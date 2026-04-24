@@ -292,6 +292,33 @@
   color: #c8e6a0;
 }
 
+/* ── Arrows Toggle Button ─────────────────────────────────────── */
+.cse-arrows-toggle-btn {
+  position: fixed;
+  bottom: 20px;
+  left: 100px;
+  background: #2a2a45;
+  border: 1px solid #3a3a5c;
+  border-radius: 8px;
+  color: #c8e6a0;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  padding: 5px 10px;
+  z-index: 99997;
+  transition: background 0.15s, transform 0.1s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.cse-arrows-toggle-btn:hover {
+  background: #3a3a60;
+  transform: scale(1.05);
+}
+.cse-arrows-toggle-btn.cse-arrows-active {
+  background: #1a3a1a;
+  border-color: #7fa650;
+  color: #c8e6a0;
+}
+
 #cse-bestmove-overlay {
   position: fixed;
   left: 0;

@@ -1,10 +1,10 @@
-﻿// Chess.com Opponent Stats Extension
+// Chess.com Opponent Stats Extension
 // Fetches opponent stats from chess.com public API
 
 const CACHE = {};
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// â”€â”€â”€ Utility â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Utility ────────────────────────────────────────────────────────────────
 
 function now() { return Date.now(); }
 
@@ -25,7 +25,7 @@ async function cachedFetch(url) {
   return data;
 }
 
-// â”€â”€â”€ Chess.com API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Chess.com API ───────────────────────────────────────────────────────────
 
 async function getPlayerStats(username) {
   return cachedFetch(`https://api.chess.com/pub/player/${username}/stats`);
@@ -73,14 +73,14 @@ function calcWLR(games, username) {
     else draws++;
   }
   const total = wins + losses + draws;
-  const wlr = losses === 0 ? (wins > 0 ? 'âˆž' : 'â€”') : (wins / losses).toFixed(2);
+  const wlr = losses === 0 ? (wins > 0 ? '∞' : '—') : (wins / losses).toFixed(2);
   return { wins, losses, draws, total, wlr };
 }
 
 function getPeakRating(stats) {
   const modes = ['chess_rapid', 'chess_blitz', 'chess_bullet', 'chess_daily'];
   let peak = 0;
-  let peakMode = 'â€”';
+  let peakMode = '—';
   for (const mode of modes) {
     const best = stats?.[mode]?.best?.rating;
     if (best && best > peak) { peak = best; peakMode = mode.replace('chess_', ''); }
@@ -98,7 +98,7 @@ function getCurrentRating(stats) {
   return result;
 }
 
-// â”€â”€â”€ UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── UI ──────────────────────────────────────────────────────────────────────
 
 function createPanel(username) {
   const panel = document.createElement('div');
@@ -106,12 +106,12 @@ function createPanel(username) {
   panel.id = `cse-panel-${username}`;
   panel.innerHTML = `
     <div class="cse-header">
-      <span class="cse-title">â™Ÿ <a href="https://www.chess.com/member/${username}" target="_blank">${username}</a></span>
-      <button class="cse-close" title="Chiudi">âœ•</button>
+      <span class="cse-title">♟ <a href="https://www.chess.com/member/${username}" target="_blank">${username}</a></span>
+      <button class="cse-close" title="Chiudi">✕</button>
     </div>
     <div class="cse-loading">
       <div class="cse-spinner"></div>
-      <span>Caricamento statisticheâ€¦</span>
+      <span>Caricamento statistiche…</span>
     </div>
     <div class="cse-content" style="display:none"></div>
   `;
@@ -130,7 +130,7 @@ function renderStats(panel, username, stats1, stats7, stats30, playerStats) {
   ).join('');
 
   const peakHTML = peak > 0
-    ? `<span class="cse-badge cse-peak">ðŸ† Peak ${peakMode}: <b>${peak}</b></span>`
+    ? `<span class="cse-badge cse-peak">🏆 Peak ${peakMode}: <b>${peak}</b></span>`
     : '';
 
   const periodRow = (label, data) => {
@@ -138,11 +138,11 @@ function renderStats(panel, username, stats1, stats7, stats30, playerStats) {
     return `
       <tr>
         <td class="cse-period">${label}</td>
-        <td class="cse-w">âœ… ${data.wins}</td>
-        <td class="cse-l">âŒ ${data.losses}</td>
-        <td class="cse-d">ðŸ¤ ${data.draws}</td>
+        <td class="cse-w">✅ ${data.wins}</td>
+        <td class="cse-l">❌ ${data.losses}</td>
+        <td class="cse-d">🤝 ${data.draws}</td>
         <td class="cse-wlr">${data.wlr}</td>
-        <td class="cse-pct">${data.total > 0 ? pct + '%' : 'â€”'}</td>
+        <td class="cse-pct">${data.total > 0 ? pct + '%' : '—'}</td>
       </tr>`;
   };
 
@@ -153,9 +153,9 @@ function renderStats(panel, username, stats1, stats7, stats30, playerStats) {
       <thead>
         <tr>
           <th>Periodo</th>
-          <th title="Vittorie">âœ…</th>
-          <th title="Sconfitte">âŒ</th>
-          <th title="Patte">ðŸ¤</th>
+          <th title="Vittorie">✅</th>
+          <th title="Sconfitte">❌</th>
+          <th title="Patte">🤝</th>
           <th title="Win/Loss Ratio">WLR</th>
           <th title="Win Rate">Win%</th>
         </tr>
@@ -166,7 +166,7 @@ function renderStats(panel, username, stats1, stats7, stats30, playerStats) {
         ${periodRow('30 giorni', stats30)}
       </tbody>
     </table>
-    <div class="cse-footer">Dati via chess.com API Â· <span class="cse-time">${new Date().toLocaleTimeString('it-IT')}</span></div>
+    <div class="cse-footer">Dati via chess.com API · <span class="cse-time">${new Date().toLocaleTimeString('it-IT')}</span></div>
   `;
 
   panel.querySelector('.cse-loading').style.display = 'none';
@@ -174,10 +174,10 @@ function renderStats(panel, username, stats1, stats7, stats30, playerStats) {
 }
 
 function renderError(panel, message) {
-  panel.querySelector('.cse-loading').innerHTML = `<span class="cse-error">âš ï¸ ${message}</span>`;
+  panel.querySelector('.cse-loading').innerHTML = `<span class="cse-error">⚠️ ${message}</span>`;
 }
 
-// â”€â”€â”€ Drag & Drop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Drag & Drop ─────────────────────────────────────────────────────────────
 
 function makeDraggable(el) {
   const header = el.querySelector('.cse-header');
@@ -203,7 +203,7 @@ function makeDraggable(el) {
   });
 }
 
-// â”€â”€â”€ Main Logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Main Logic ───────────────────────────────────────────────────────────────
 
 async function loadStatsForUser(username) {
   const existingPanel = document.getElementById(`cse-panel-${username}`);
@@ -234,18 +234,19 @@ async function loadStatsForUser(username) {
   }
 }
 
-// â”€â”€â”€ Evaluation Bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Evaluation Bar ───────────────────────────────────────────────────────────
 
 let evalBarPanel = null;
 let evalUpdateInterval = null;
 let lastEvalFen = null;
 let currentBestMove = null;
 let bestMoveOverlay = null;
+let arrowsEnabled = true; // Toggle per le frecce
 const STOCKFISH_ONLINE_DEPTH = 15;
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
 
-// â”€â”€ FEN extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── FEN extraction ────────────────────────────────────────────
 
 function isFen(s) {
   return !!normalizeFen(s);
@@ -487,7 +488,7 @@ function findFenInObject(root, maxDepth = FEN_SEARCH_MAX_DEPTH, maxNodes = FEN_S
 
 function getFenFromPage() {
   const inferredTurn = detectSideToMove();
-  // â”€â”€ Method 1: Direct JS properties on the custom element â”€â”€â”€â”€â”€â”€
+  // ── Method 1: Direct JS properties on the custom element ──────
   // chess.com exposes game state directly on chess-board / wc-chess-board
   for (const sel of ['chess-board', 'wc-chess-board']) {
     const el = document.querySelector(sel);
@@ -505,20 +506,20 @@ function getFenFromPage() {
       if (fen) return fen;
     } catch {}
 
-    // â”€â”€ Method 2: attribute "fen" on the element itself â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Method 2: attribute "fen" on the element itself ──────────
     for (const attr of ['fen', 'data-fen']) {
       const attrFen = normalizeFen(el.getAttribute(attr), { turn: inferredTurn });
       if (attrFen) return attrFen;
     }
   }
 
-  // â”€â”€ Method 3: any element with a fen attribute â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Method 3: any element with a fen attribute ────────────────
   for (const el of document.querySelectorAll('[fen], [data-fen]')) {
     const fen = normalizeFen(el.getAttribute('fen') || el.getAttribute('data-fen'), { turn: inferredTurn });
     if (fen) return fen;
   }
 
-  // â”€â”€ Method 4: scan window for game objects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Method 4: scan window for game objects ────────────────────
   try {
     for (const key of Object.keys(window)) {
       if (!/(fen|game|chess|board|state|move)/i.test(key)) continue;
@@ -529,14 +530,14 @@ function getFenFromPage() {
     }
   } catch {}
 
-  // â”€â”€ Method 5: URL param â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Method 5: URL param ───────────────────────────────────────
   const m = location.href.match(/[?&]fen=([^&#]+)/);
   if (m) {
     const fen = normalizeFen(decodeURIComponent(m[1]), { turn: inferredTurn });
     if (fen) return fen;
   }
 
-  // â”€â”€ Method 6: read pieces from Shadow DOM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Method 6: read pieces from Shadow DOM ─────────────────────
   return fenFromPieces();
 }
 
@@ -592,7 +593,7 @@ function fenFromPieces() {
     const pieceClass = classes.find(c => pieceMap[c]);
     if (!pieceClass) continue;
 
-    // Find square (e.g. "square-14" â†’ file=1, rank=4)
+    // Find square (e.g. "square-14" → file=1, rank=4)
     const sqClass = classes.find(c => /^square-\d{2}$/.test(c));
     if (!sqClass) continue;
 
@@ -618,7 +619,7 @@ function fenFromPieces() {
     if (boardEl) {
       const orientation = boardEl.getAttribute('orientation') || '';
       // If we're playing as black, it might be white's turn after black moves, etc.
-      // Simpler: check the highlighted squares â€” the last move was made by the opposite color
+      // Simpler: check the highlighted squares — the last move was made by the opposite color
       const highlighted = (boardEl.shadowRoot || boardEl).querySelectorAll('[class*="highlight"]');
       // fallback: keep 'w'
     }
@@ -645,7 +646,7 @@ function fenFromPieces() {
   return fen;
 }
 
-// â”€â”€ Stockfish eval API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Stockfish eval API ────────────────────────────────────────
 let evalAbortController = null;
 
 async function fetchEval(fen) {
@@ -654,7 +655,7 @@ async function fetchEval(fen) {
   evalAbortController = new AbortController();
   const signal = evalAbortController.signal;
 
-  // Primary: stockfish.online â€” real Stockfish engine, depth 15
+  // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
     const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${STOCKFISH_ONLINE_DEPTH}`;
     const res = await fetch(url, { signal });
@@ -694,7 +695,7 @@ async function fetchEval(fen) {
   return null;
 }
 
-// â”€â”€ Bar rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Bar rendering ─────────────────────────────────────────────
 function extractUciMove(text) {
   if (typeof text !== 'string') return null;
   const match = text.match(/\b([a-h][1-8][a-h][1-8][qrbn]?)\b/i);
@@ -773,7 +774,7 @@ function clearBestMoveOverlay() {
 }
 
 function syncBestMoveOverlay() {
-  if (!currentBestMove) return hideBestMoveOverlay();
+  if (!arrowsEnabled || !currentBestMove) return hideBestMoveOverlay();
 
   const boardEl = getBoardElement();
   if (!boardEl) return hideBestMoveOverlay();
@@ -811,11 +812,11 @@ function syncBestMoveOverlay() {
   const padding = Math.max(8, start.cell * 0.22);
   const x1p = x1 + ux * padding;
   const y1p = y1 + uy * padding;
-  const x2p = x2 - ux * padding * 1.25;
-  const y2p = y2 - uy * padding * 1.25;
-  const radius = Math.max(4, start.cell * 0.14);
-  const headLength = Math.max(10, start.cell * 0.34);
-  const headWidth = Math.max(8, start.cell * 0.22);
+  const x2p = x2 - ux * padding;
+  const y2p = y2 - uy * padding;
+  const radius = Math.max(3, start.cell * 0.18);
+  const headLength = Math.max(12, start.cell * 0.3);
+  const headWidth = Math.max(10, start.cell * 0.25);
   const baseX = x2 - ux * headLength;
   const baseY = y2 - uy * headLength;
   const perpX = -uy;
@@ -845,7 +846,7 @@ function setBestMove(bestMove) {
 
 function cpToWhitePct(cp) {
   // cp is raw centipawns (e.g. 50 = half pawn). Sigmoid tuned to cp units.
-  // Â±300cp = slight/moderate advantage, Â±800cp â‰ˆ decisive
+  // ±300cp = slight/moderate advantage, ±800cp ≈ decisive
   const pct = 50 + 50 * (2 / (1 + Math.exp(-cp / 200)) - 1);
   return Math.max(2, Math.min(98, pct));
 }
@@ -859,7 +860,7 @@ function updateEvalBarDisplay(result) {
   const scoreEl  = bar.querySelector('#cse-eval-score');
 
   if (!result) {
-    // Could not get eval â€” show neutral + error indicator
+    // Could not get eval — show neutral + error indicator
     blackSeg.style.height = '50%';
     whiteSeg.style.height = '50%';
     scoreEl.textContent = '?';
@@ -876,13 +877,13 @@ function updateEvalBarDisplay(result) {
   if (result.mate !== null && result.mate !== undefined) {
     const m = result.mate;
     whitePct = m > 0 ? 97 : 3;
-    label = (m > 0 ? '+' : 'âˆ’') + 'M' + Math.abs(m);
+    label = (m > 0 ? '+' : '−') + 'M' + Math.abs(m);
     cls   = m > 0 ? 'cse-eval-white-adv' : 'cse-eval-black-adv';
   } else {
     const cp = result.cp; // raw centipawns
     whitePct = cpToWhitePct(cp);
     const pawns = cp / 100;
-    label = (pawns >= 0 ? '+' : 'âˆ’') + Math.abs(pawns).toFixed(1);
+    label = (pawns >= 0 ? '+' : '−') + Math.abs(pawns).toFixed(1);
     cls   = cp >  25 ? 'cse-eval-white-adv'
           : cp < -25 ? 'cse-eval-black-adv'
           : '';
@@ -901,14 +902,14 @@ function createEvalBar() {
   const bar = document.createElement('div');
   bar.id = 'cse-eval-bar';
   bar.innerHTML = `
-    <div class="cse-eval-drag-handle" id="cse-eval-drag" title="Trascina per spostare">â ¿</div>
+    <div class="cse-eval-drag-handle" id="cse-eval-drag" title="Trascina per spostare">⠿</div>
     <div class="cse-eval-inner" id="cse-eval-inner">
       <div class="cse-eval-black" id="cse-eval-black-seg" style="height:50%"></div>
       <div class="cse-eval-white" id="cse-eval-white-seg" style="height:50%"></div>
     </div>
-    <div class="cse-eval-score" id="cse-eval-score">â€¦</div>
+    <div class="cse-eval-score" id="cse-eval-score">…</div>
     <div class="cse-eval-label">Eval</div>
-    <button class="cse-eval-close" id="cse-eval-close-btn" title="Chiudi">âœ•</button>
+    <button class="cse-eval-close" id="cse-eval-close-btn" title="Chiudi">✕</button>
   `;
   document.body.appendChild(bar);
 
@@ -981,7 +982,7 @@ async function tickEvalBar() {
 
   // Show "calculating" state immediately
   const scoreEl = bar.querySelector('#cse-eval-score');
-  scoreEl.textContent = 'â€¦';
+  scoreEl.textContent = '…';
   scoreEl.className = 'cse-eval-score cse-eval-thinking';
   clearBestMoveOverlay();
 
@@ -1002,7 +1003,7 @@ function toggleEvalBar() {
   evalUpdateInterval = setInterval(tickEvalBar, 1500);
 }
 
-// â”€â”€â”€ Eval Toggle Button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Eval Toggle Button ────────────────────────────────────────────────────────
 
 function injectEvalToggleButton() {
   if (document.getElementById('cse-eval-toggle-btn')) return;
@@ -1011,12 +1012,12 @@ function injectEvalToggleButton() {
   btn.id = 'cse-eval-toggle-btn';
   btn.className = 'cse-eval-toggle-btn';
   btn.title = 'Mostra/nascondi Evaluation Bar';
-  btn.textContent = 'âš–ï¸ Eval';
+  btn.textContent = String.fromCharCode(0x1F4CA) + ' Eval';  // 📊
   btn.addEventListener('click', toggleEvalBar);
   document.body.appendChild(btn);
 }
 
-// â”€â”€â”€ Inject Buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Inject Buttons ───────────────────────────────────────────────────────────
 
 function addStatsButton(usernameEl, username) {
   if (!username || usernameEl.dataset.cseInjected) return;
@@ -1025,7 +1026,7 @@ function addStatsButton(usernameEl, username) {
   const btn = document.createElement('button');
   btn.className = 'cse-btn';
   btn.title = `Mostra statistiche di ${username}`;
-  btn.textContent = 'ðŸ“Š';
+  btn.textContent = '📊';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -1065,7 +1066,24 @@ function scanAndInject() {
   }
 }
 
-// â”€â”€â”€ Observer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Observer ────────────────────────────────────────────────────────────────
+
+function injectArrowsToggleButton() {
+  if (document.getElementById('cse-arrows-toggle-btn')) return;
+
+  const btn = document.createElement('button');
+  btn.id = 'cse-arrows-toggle-btn';
+  btn.className = 'cse-arrows-toggle-btn cse-arrows-active';
+  btn.title = 'Mostra/nascondi frecce della miglior mossa';
+  btn.textContent = '➜ Arrows';
+  btn.addEventListener('click', () => {
+    arrowsEnabled = !arrowsEnabled;
+    btn.classList.toggle('cse-arrows-active', arrowsEnabled);
+    if (!arrowsEnabled) hideBestMoveOverlay();
+    else syncBestMoveOverlay();
+  });
+  document.body.appendChild(btn);
+}
 
 function scanAndInjectEval() {
   // Only show eval button if a chess board is visible on the page
@@ -1074,6 +1092,7 @@ function scanAndInjectEval() {
   );
   if (hasBoard) {
     injectEvalToggleButton();
+    injectArrowsToggleButton();
   }
 }
 
@@ -1093,5 +1112,3 @@ new MutationObserver(() => {
     setTimeout(scanAndInject, 1000);
   }
 }).observe(document, { subtree: true, childList: true });
-
-
