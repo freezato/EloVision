@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Chess.com Opponent Stats",
+  "version": "1.0.0",
+  "description": "Mostra le statistiche dell'avversario su chess.com: win/lose in 1, 7, 30 giorni, WLR e peak ELO.",
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": [
+    "https://www.chess.com/*",
+    "https://api.chess.com/*",
+    "https://lichess.org/*",
+    "https://stockfish.online/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.chess.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

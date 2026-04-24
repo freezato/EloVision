@@ -1,0 +1,336 @@
+/* Chess.com Opponent Stats Extension – Styles */
+
+/* ── Trigger Button ─────────────────────────────────────────── */
+.cse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 5px;
+  padding: 1px 4px;
+  background: #7fa650;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  vertical-align: middle;
+  transition: background 0.15s, transform 0.1s;
+  z-index: 9999;
+}
+.cse-btn:hover {
+  background: #5a8a32;
+  transform: scale(1.1);
+}
+
+/* ── Panel ──────────────────────────────────────────────────── */
+.cse-panel {
+  position: fixed;
+  top: 80px;
+  right: 20px;
+  width: 380px;
+  background: #1e1e2e;
+  border: 1px solid #3a3a5c;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  z-index: 99999;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: #e0e0f0;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ── Header ─────────────────────────────────────────────────── */
+.cse-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #2a2a45;
+  padding: 10px 14px;
+  cursor: grab;
+  border-bottom: 1px solid #3a3a5c;
+}
+.cse-header:active { cursor: grabbing; }
+
+.cse-title {
+  font-weight: 700;
+  font-size: 15px;
+  color: #c8e6a0;
+  letter-spacing: 0.3px;
+}
+.cse-title a {
+  color: #c8e6a0;
+  text-decoration: none;
+}
+.cse-title a:hover { text-decoration: underline; }
+
+.cse-close {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+}
+.cse-close:hover { background: #ff4d4d22; color: #ff6b6b; }
+
+/* ── Loading ────────────────────────────────────────────────── */
+.cse-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 18px;
+  font-size: 14px;
+  color: #aaa;
+}
+.cse-spinner {
+  width: 18px; height: 18px;
+  border: 3px solid #3a3a5c;
+  border-top-color: #7fa650;
+  border-radius: 50%;
+  animation: cse-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes cse-spin { to { transform: rotate(360deg); } }
+
+.cse-error { color: #ff8a80; font-size: 13px; }
+
+/* ── Content ────────────────────────────────────────────────── */
+.cse-content { padding: 12px 14px 14px; }
+
+/* ── Rating Badges ──────────────────────────────────────────── */
+.cse-ratings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.cse-badge {
+  background: #2a2a45;
+  border: 1px solid #3a3a5c;
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: #c8d8ff;
+}
+.cse-badge b { color: #ffffff; }
+.cse-peak {
+  background: #3a2a10;
+  border-color: #c8922a;
+  color: #ffd580;
+}
+.cse-peak b { color: #ffd580; }
+
+/* ── Table ──────────────────────────────────────────────────── */
+.cse-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.cse-table thead tr {
+  background: #2a2a45;
+  color: #9090b8;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.cse-table th, .cse-table td {
+  padding: 7px 8px;
+  text-align: center;
+  border-bottom: 1px solid #2a2a3e;
+}
+.cse-table th:first-child, .cse-table td:first-child {
+  text-align: left;
+}
+.cse-table tbody tr:hover { background: #24243a; }
+.cse-table tbody tr:last-child td { border-bottom: none; }
+
+.cse-period { color: #b0b0d0; font-weight: 500; }
+.cse-w { color: #81c784; font-weight: 600; }
+.cse-l { color: #e57373; font-weight: 600; }
+.cse-d { color: #90a4ae; }
+.cse-wlr { color: #ffd54f; font-weight: 700; font-size: 13px; }
+.cse-pct { color: #80cbc4; font-size: 12px; }
+
+/* ── Footer ─────────────────────────────────────────────────── */
+.cse-footer {
+  margin-top: 10px;
+  font-size: 10px;
+  color: #555577;
+  text-align: right;
+}
+.cse-time { color: #666688; }
+
+/* ── Evaluation Bar ─────────────────────────────────────────── */
+#cse-eval-bar {
+  position: fixed;
+  left: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  height: 340px;
+  background: #1e1e2e;
+  border: 1px solid #3a3a5c;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  z-index: 99998;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 0 6px;
+  gap: 3px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  user-select: none;
+}
+
+/* Drag handle at top */
+.cse-eval-drag-handle {
+  font-size: 13px;
+  color: #444466;
+  cursor: grab;
+  line-height: 1;
+  padding: 0 2px;
+  transition: color 0.15s;
+}
+.cse-eval-drag-handle:active { cursor: grabbing; }
+.cse-eval-drag-handle:hover  { color: #7fa650; }
+
+/* The bar itself: fixed height container, children use height% */
+.cse-eval-inner {
+  flex: 1;
+  width: 18px;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;   /* black on top, white on bottom */
+  border: 1px solid #3a3a5c;
+  min-height: 0;
+}
+
+.cse-eval-black {
+  background: #1a1a1a;
+  width: 100%;
+  transition: height 0.5s ease;
+}
+
+.cse-eval-white {
+  background: #f0ead6;
+  width: 100%;
+  transition: height 0.5s ease;
+}
+
+.cse-eval-score {
+  font-size: 9px;
+  font-weight: 700;
+  color: #aaaacc;
+  text-align: center;
+  line-height: 1;
+  width: 100%;
+  padding: 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.cse-eval-score.cse-eval-white-adv { color: #e8e8e8; }
+.cse-eval-score.cse-eval-black-adv { color: #666688; }
+
+.cse-eval-label {
+  font-size: 7px;
+  color: #444466;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cse-eval-close {
+  background: none;
+  border: none;
+  color: #444466;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px;
+  border-radius: 3px;
+  line-height: 1;
+  transition: color 0.15s;
+}
+.cse-eval-close:hover { color: #ff6b6b; }
+
+.cse-eval-score.cse-eval-thinking {
+  animation: cse-eval-pulse 1s ease-in-out infinite;
+  color: #666688;
+}
+@keyframes cse-eval-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+/* ── Eval Toggle Button ─────────────────────────────────────── */
+.cse-eval-toggle-btn {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  background: #2a2a45;
+  border: 1px solid #3a3a5c;
+  border-radius: 8px;
+  color: #c8e6a0;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  padding: 5px 10px;
+  z-index: 99997;
+  transition: background 0.15s, transform 0.1s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.cse-eval-toggle-btn:hover {
+  background: #3a3a60;
+  transform: scale(1.05);
+}
+.cse-eval-toggle-btn.cse-eval-active {
+  background: #1a3a1a;
+  border-color: #7fa650;
+  color: #c8e6a0;
+}
+
+#cse-bestmove-overlay {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 99996;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+#cse-bestmove-overlay.cse-bestmove-visible {
+  opacity: 1;
+}
+
+.cse-bestmove-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 0 6px rgba(127, 166, 80, 0.55));
+}
+
+#cse-bestmove-line {
+  stroke: rgba(127, 166, 80, 0.88);
+  stroke-width: 10;
+  stroke-linecap: round;
+  marker-end: none;
+}
+
+#cse-bestmove-start {
+  fill: rgba(127, 166, 80, 0.28);
+  stroke: rgba(127, 166, 80, 0.95);
+  stroke-width: 2;
+}
+
+#cse-bestmove-head {
+  fill: rgba(127, 166, 80, 0.95);
+  stroke: rgba(235, 247, 214, 0.95);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
