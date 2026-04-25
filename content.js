@@ -3,6 +3,8 @@
 
 const CACHE = {};
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const panelByUsername = new Map();
+const injectedUsernameEls = new WeakSet();
 
 // ─── Utility ────────────────────────────────────────────────────────────────
 
@@ -103,7 +105,6 @@ function getCurrentRating(stats) {
 function createPanel(username) {
   const panel = document.createElement('div');
   panel.className = 'cse-panel';
-  panel.id = `cse-panel-${username}`;
   panel.innerHTML = `
     <div class="cse-header">
       <span class="cse-title">♟ <a href="https://www.chess.com/member/${username}" target="_blank">${username}</a></span>
@@ -115,9 +116,13 @@ function createPanel(username) {
     </div>
     <div class="cse-content" style="display:none"></div>
   `;
-  panel.querySelector('.cse-close').addEventListener('click', () => panel.remove());
+  panel.querySelector('.cse-close').addEventListener('click', () => {
+    panelByUsername.delete(username);
+    panel.remove();
+  });
   document.body.appendChild(panel);
   makeDraggable(panel);
+  panelByUsername.set(username, panel);
   return panel;
 }
 
@@ -206,8 +211,11 @@ function makeDraggable(el) {
 // ─── Main Logic ───────────────────────────────────────────────────────────────
 
 async function loadStatsForUser(username) {
-  const existingPanel = document.getElementById(`cse-panel-${username}`);
-  if (existingPanel) { existingPanel.remove(); }
+  const existingPanel = panelByUsername.get(username);
+  if (existingPanel) {
+    existingPanel.remove();
+    panelByUsername.delete(username);
+  }
 
   const panel = createPanel(username);
 
@@ -241,10 +249,13 @@ let evalUpdateInterval = null;
 let lastEvalFen = null;
 let currentBestMove = null;
 let bestMoveOverlay = null;
+let evalToggleBtn = null;
+let arrowsToggleBtn = null;
 let arrowsEnabled = true; // Toggle per le frecce
 const STOCKFISH_ONLINE_DEPTH = 15;
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
+const EVAL_CACHE_TTL = 12 * 1000;
 
 // ── FEN extraction ────────────────────────────────────────────
 
@@ -648,12 +659,32 @@ function fenFromPieces() {
 
 // ── Stockfish eval API ────────────────────────────────────────
 let evalAbortController = null;
+const evalCache = new Map();
+let evalRequestSeq = 0;
+
+function getCachedEval(fen) {
+  const entry = evalCache.get(fen);
+  if (!entry) return null;
+  if (now() - entry.ts > EVAL_CACHE_TTL) {
+    evalCache.delete(fen);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedEval(fen, value) {
+  evalCache.set(fen, { ts: now(), value });
+}
 
 async function fetchEval(fen) {
+  const cached = getCachedEval(fen);
+  if (cached) return cached;
+
   // Cancel any in-flight request for a previous position
   if (evalAbortController) evalAbortController.abort();
   evalAbortController = new AbortController();
   const signal = evalAbortController.signal;
+  const turn = fen.split(' ')[1] || 'w';
 
   // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
@@ -664,10 +695,17 @@ async function fetchEval(fen) {
       if (data.success) {
         const bestMove = extractUciMove(data.bestmove);
         if (data.mate !== null && data.mate !== undefined && data.mate !== 0) {
-          return { cp: null, mate: data.mate, bestMove };
+          const result = { cp: null, mate: turn === 'w' ? data.mate : -data.mate, bestMove };
+          setCachedEval(fen, result);
+          return result;
         }
-        const cp = Math.round(parseFloat(data.evaluation) * 100);
-        if (!isNaN(cp)) return { cp, mate: null, bestMove };
+        const cpRaw = Math.round(parseFloat(data.evaluation) * 100);
+        const cp = turn === 'w' ? cpRaw : -cpRaw;
+        if (!isNaN(cp)) {
+          const result = { cp, mate: null, bestMove };
+          setCachedEval(fen, result);
+          return result;
+        }
       }
     }
   } catch (e) {
@@ -682,10 +720,17 @@ async function fetchEval(fen) {
       const data = await res.json();
       const pv = data.pvs && data.pvs[0];
       if (pv) {
-        const turn = fen.split(' ')[1] || 'w';
         const bestMove = extractUciMove(pv.moves);
-        if (pv.mate !== undefined) return { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove };
-        if (pv.cp  !== undefined) return { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove };
+        if (pv.mate !== undefined) {
+          const result = { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove };
+          setCachedEval(fen, result);
+          return result;
+        }
+        if (pv.cp  !== undefined) {
+          const result = { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove };
+          setCachedEval(fen, result);
+          return result;
+        }
       }
     }
   } catch (e) {
@@ -703,15 +748,29 @@ function extractUciMove(text) {
 }
 
 function getBoardElement() {
-  const boards = Array.from(document.querySelectorAll('chess-board, wc-chess-board, .board-layout-chessboard'));
-  return boards.find(el => {
+  const boardCandidates = Array.from(document.querySelectorAll('chess-board, wc-chess-board'));
+  const directBoard = boardCandidates.find(el => {
     try {
       const rect = el.getBoundingClientRect();
       return rect.width > 40 && rect.height > 40;
     } catch {
       return false;
     }
-  }) || null;
+  });
+  if (directBoard) return directBoard;
+
+  // Fallback: locate the board inside layout containers (if chess.com changes markup).
+  const containers = Array.from(document.querySelectorAll('.board-layout-chessboard'));
+  for (const container of containers) {
+    const nested = container.querySelector('chess-board, wc-chess-board');
+    if (!nested) continue;
+    try {
+      const rect = nested.getBoundingClientRect();
+      if (rect.width > 40 && rect.height > 40) return nested;
+    } catch {}
+  }
+
+  return null;
 }
 
 function isBoardFlipped(boardEl = getBoardElement()) {
@@ -727,6 +786,32 @@ function isBoardFlipped(boardEl = getBoardElement()) {
   if (orientation === 'white' || orientation === 'w') return false;
 
   return !!document.querySelector('[class*="board-flipped"], [flipped], .flipped-board') || boardEl.flipped === true;
+}
+
+function getExplicitBoardFlipState(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
+
+  const orientation = (
+    boardEl.getAttribute?.('orientation') ||
+    boardEl.getAttribute?.('data-orientation') ||
+    boardEl.dataset?.orientation ||
+    ''
+  ).toLowerCase();
+  if (orientation === 'black' || orientation === 'b') return true;
+  if (orientation === 'white' || orientation === 'w') return false;
+
+  const flippedAttr = boardEl.getAttribute?.('flipped');
+  if (flippedAttr === '' || flippedAttr === 'true') return true;
+  if (flippedAttr === 'false') return false;
+  if (boardEl.hasAttribute?.('flipped')) return true;
+
+  if (boardEl.flipped === true) return true;
+
+  if (boardEl.classList?.contains('board-flipped') || document.querySelector('.flipped-board, [class*="board-flipped"]')) {
+    return true;
+  }
+
+  return null;
 }
 
 function squareToViewportPoint(square, rect, flipped) {
@@ -751,12 +836,12 @@ function ensureBestMoveOverlay() {
   if (bestMoveOverlay && bestMoveOverlay.isConnected) return bestMoveOverlay;
 
   const overlay = document.createElement('div');
-  overlay.id = 'cse-bestmove-overlay';
+  overlay.className = 'cse-bestmove-overlay';
   overlay.innerHTML = `
     <svg class="cse-bestmove-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
-      <line id="cse-bestmove-line" x1="0" y1="0" x2="0" y2="0"></line>
-      <circle id="cse-bestmove-start" cx="0" cy="0" r="0"></circle>
-      <polygon id="cse-bestmove-head" points="0,0 0,0 0,0"></polygon>
+      <line class="cse-bestmove-line" x1="0" y1="0" x2="0" y2="0"></line>
+      <circle class="cse-bestmove-start" cx="0" cy="0" r="0"></circle>
+      <polygon class="cse-bestmove-head" points="0,0 0,0 0,0"></polygon>
     </svg>
   `;
   document.body.appendChild(overlay);
@@ -773,11 +858,31 @@ function clearBestMoveOverlay() {
   hideBestMoveOverlay();
 }
 
+function getPlayerSide(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
+
+  const explicitFlip = getExplicitBoardFlipState(boardEl);
+  if (explicitFlip === true) return 'b';
+  if (explicitFlip === false) return 'w';
+
+  return null;
+}
+
+function shouldDisplayBestMoveArrow(boardEl = getBoardElement(), fen = lastEvalFen) {
+  if (!boardEl || !fen) return true;
+
+  const fenTurn = normalizeTurn(fen.split(' ')[1]);
+  const playerSide = getPlayerSide(boardEl);
+  if (!fenTurn || !playerSide) return true;
+  return fenTurn === playerSide;
+}
+
 function syncBestMoveOverlay() {
   if (!arrowsEnabled || !currentBestMove) return hideBestMoveOverlay();
 
   const boardEl = getBoardElement();
   if (!boardEl) return hideBestMoveOverlay();
+  if (!shouldDisplayBestMoveArrow(boardEl, lastEvalFen)) return hideBestMoveOverlay();
 
   const rect = boardEl.getBoundingClientRect();
   if (rect.width < 40 || rect.height < 40) return hideBestMoveOverlay();
@@ -791,9 +896,9 @@ function syncBestMoveOverlay() {
 
   const overlay = ensureBestMoveOverlay();
   const svg = overlay.querySelector('.cse-bestmove-svg');
-  const line = overlay.querySelector('#cse-bestmove-line');
-  const startCircle = overlay.querySelector('#cse-bestmove-start');
-  const head = overlay.querySelector('#cse-bestmove-head');
+  const line = overlay.querySelector('.cse-bestmove-line');
+  const startCircle = overlay.querySelector('.cse-bestmove-start');
+  const head = overlay.querySelector('.cse-bestmove-head');
 
   overlay.style.left = rect.left + 'px';
   overlay.style.top = rect.top + 'px';
@@ -815,8 +920,9 @@ function syncBestMoveOverlay() {
   const x2p = x2 - ux * padding;
   const y2p = y2 - uy * padding;
   const radius = Math.max(3, start.cell * 0.18);
-  const headLength = Math.max(12, start.cell * 0.3);
-  const headWidth = Math.max(10, start.cell * 0.25);
+  const lineWidth = Math.max(6, start.cell * 0.26);
+  const headLength = Math.max(10, start.cell * 0.38);
+  const headWidth = Math.max(8, start.cell * 0.2);
   const baseX = x2 - ux * headLength;
   const baseY = y2 - uy * headLength;
   const perpX = -uy;
@@ -827,6 +933,7 @@ function syncBestMoveOverlay() {
   const rightY = baseY - perpY * headWidth;
 
   svg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
+  line.setAttribute('stroke-width', String(lineWidth));
   line.setAttribute('x1', x1p);
   line.setAttribute('y1', y1p);
   line.setAttribute('x2', x2p);
@@ -852,12 +959,12 @@ function cpToWhitePct(cp) {
 }
 
 function updateEvalBarDisplay(result) {
-  const bar = document.getElementById('cse-eval-bar');
+  const bar = evalBarPanel;
   if (!bar) return;
 
-  const blackSeg = bar.querySelector('#cse-eval-black-seg');
-  const whiteSeg = bar.querySelector('#cse-eval-white-seg');
-  const scoreEl  = bar.querySelector('#cse-eval-score');
+  const blackSeg = bar.querySelector('[data-cse-part="black"]');
+  const whiteSeg = bar.querySelector('[data-cse-part="white"]');
+  const scoreEl  = bar.querySelector('[data-cse-part="score"]');
 
   if (!result) {
     // Could not get eval — show neutral + error indicator
@@ -900,14 +1007,14 @@ function createEvalBar() {
   if (evalBarPanel) return evalBarPanel;
 
   const bar = document.createElement('div');
-  bar.id = 'cse-eval-bar';
+  bar.className = 'cse-eval-bar-root';
   bar.innerHTML = `
     <div class="cse-eval-drag-handle" id="cse-eval-drag" title="Trascina per spostare">⠿</div>
     <div class="cse-eval-inner" id="cse-eval-inner">
-      <div class="cse-eval-black" id="cse-eval-black-seg" style="height:50%"></div>
-      <div class="cse-eval-white" id="cse-eval-white-seg" style="height:50%"></div>
+      <div class="cse-eval-black" data-cse-part="black" style="height:50%"></div>
+      <div class="cse-eval-white" data-cse-part="white" style="height:50%"></div>
     </div>
-    <div class="cse-eval-score" id="cse-eval-score">…</div>
+    <div class="cse-eval-score" data-cse-part="score">…</div>
     <div class="cse-eval-label">Eval</div>
     <button class="cse-eval-close" id="cse-eval-close-btn" title="Chiudi">✕</button>
   `;
@@ -951,25 +1058,38 @@ function makeEvalBarDraggable(bar) {
 
 function removeEvalBar() {
   if (evalUpdateInterval) { clearInterval(evalUpdateInterval); evalUpdateInterval = null; }
+  evalRequestSeq++;
   if (evalBarPanel) { evalBarPanel.remove(); evalBarPanel = null; }
   clearBestMoveOverlay();
   lastEvalFen = null;
-  const btn = document.getElementById('cse-eval-toggle-btn');
-  if (btn) btn.classList.remove('cse-eval-active');
+  if (evalToggleBtn) evalToggleBtn.classList.remove('cse-eval-active');
 }
 
 let evalPending = false;
 
 async function tickEvalBar() {
-  const bar = document.getElementById('cse-eval-bar');
+  const bar = evalBarPanel;
   if (!bar) return;
 
   const fen = getFenFromPage();
 
   if (!fen) {
-    bar.querySelector('#cse-eval-score').textContent = '?';
+    evalRequestSeq++;
+    lastEvalFen = null;
+    bar.querySelector('[data-cse-part="score"]').textContent = '?';
     bar.title = 'Posizione non trovata sulla board';
     hideBestMoveOverlay();
+    return;
+  }
+
+  const boardEl = getBoardElement();
+  if (boardEl && !shouldDisplayBestMoveArrow(boardEl, fen)) {
+    evalRequestSeq++;
+    lastEvalFen = fen;
+    bar.querySelector('[data-cse-part="score"]').textContent = '⏸';
+    bar.querySelector('[data-cse-part="score"]').className = 'cse-eval-score';
+    bar.title = 'In attesa del tuo turno';
+    clearBestMoveOverlay();
     return;
   }
 
@@ -978,55 +1098,55 @@ async function tickEvalBar() {
     return;
   }
   lastEvalFen = fen;
+  const requestSeq = ++evalRequestSeq;
   bar.title = '';
 
   // Show "calculating" state immediately
-  const scoreEl = bar.querySelector('#cse-eval-score');
+  const scoreEl = bar.querySelector('[data-cse-part="score"]');
   scoreEl.textContent = '…';
   scoreEl.className = 'cse-eval-score cse-eval-thinking';
-  clearBestMoveOverlay();
 
   const result = await fetchEval(fen);
-  if (result === null && lastEvalFen !== fen) return; // aborted, newer position coming
+  if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
   updateEvalBarDisplay(result);
 }
 
 function toggleEvalBar() {
-  const btn = document.getElementById('cse-eval-toggle-btn');
-  if (evalBarPanel && document.getElementById('cse-eval-bar')) {
+  const btn = evalToggleBtn;
+  if (evalBarPanel?.isConnected) {
     removeEvalBar();
     return;
   }
   createEvalBar();
   if (btn) btn.classList.add('cse-eval-active');
   tickEvalBar();
-  evalUpdateInterval = setInterval(tickEvalBar, 1500);
+  evalUpdateInterval = setInterval(tickEvalBar, 1000);
 }
 
 // ─── Eval Toggle Button ────────────────────────────────────────────────────────
 
 function injectEvalToggleButton() {
-  if (document.getElementById('cse-eval-toggle-btn')) return;
+  if (evalToggleBtn?.isConnected) return;
 
   const btn = document.createElement('button');
-  btn.id = 'cse-eval-toggle-btn';
   btn.className = 'cse-eval-toggle-btn';
   btn.title = 'Mostra/nascondi Evaluation Bar';
-  btn.textContent = String.fromCharCode(0x1F4CA) + ' Eval';  // 📊
+  btn.textContent = '🧠 Eval';
   btn.addEventListener('click', toggleEvalBar);
   document.body.appendChild(btn);
+  evalToggleBtn = btn;
 }
 
 // ─── Inject Buttons ───────────────────────────────────────────────────────────
 
 function addStatsButton(usernameEl, username) {
-  if (!username || usernameEl.dataset.cseInjected) return;
-  usernameEl.dataset.cseInjected = '1';
+  if (!username || injectedUsernameEls.has(usernameEl)) return;
+  injectedUsernameEls.add(usernameEl);
 
   const btn = document.createElement('button');
   btn.className = 'cse-btn';
   btn.title = `Mostra statistiche di ${username}`;
-  btn.textContent = '📊';
+  btn.textContent = '📈';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -1069,13 +1189,12 @@ function scanAndInject() {
 // ─── Observer ────────────────────────────────────────────────────────────────
 
 function injectArrowsToggleButton() {
-  if (document.getElementById('cse-arrows-toggle-btn')) return;
+  if (arrowsToggleBtn?.isConnected) return;
 
   const btn = document.createElement('button');
-  btn.id = 'cse-arrows-toggle-btn';
   btn.className = 'cse-arrows-toggle-btn cse-arrows-active';
   btn.title = 'Mostra/nascondi frecce della miglior mossa';
-  btn.textContent = '➜ Arrows';
+  btn.textContent = '➤ Arrows';
   btn.addEventListener('click', () => {
     arrowsEnabled = !arrowsEnabled;
     btn.classList.toggle('cse-arrows-active', arrowsEnabled);
@@ -1083,6 +1202,7 @@ function injectArrowsToggleButton() {
     else syncBestMoveOverlay();
   });
   document.body.appendChild(btn);
+  arrowsToggleBtn = btn;
 }
 
 function scanAndInjectEval() {
