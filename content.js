@@ -788,6 +788,32 @@ function isBoardFlipped(boardEl = getBoardElement()) {
   return !!document.querySelector('[class*="board-flipped"], [flipped], .flipped-board') || boardEl.flipped === true;
 }
 
+function getExplicitBoardFlipState(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
+
+  const orientation = (
+    boardEl.getAttribute?.('orientation') ||
+    boardEl.getAttribute?.('data-orientation') ||
+    boardEl.dataset?.orientation ||
+    ''
+  ).toLowerCase();
+  if (orientation === 'black' || orientation === 'b') return true;
+  if (orientation === 'white' || orientation === 'w') return false;
+
+  const flippedAttr = boardEl.getAttribute?.('flipped');
+  if (flippedAttr === '' || flippedAttr === 'true') return true;
+  if (flippedAttr === 'false') return false;
+  if (boardEl.hasAttribute?.('flipped')) return true;
+
+  if (boardEl.flipped === true) return true;
+
+  if (boardEl.classList?.contains('board-flipped') || document.querySelector('.flipped-board, [class*="board-flipped"]')) {
+    return true;
+  }
+
+  return null;
+}
+
 function squareToViewportPoint(square, rect, flipped) {
   if (!/^[a-h][1-8]$/i.test(square)) return null;
   const file = square.charCodeAt(0) - 97;
@@ -835,6 +861,17 @@ function clearBestMoveOverlay() {
 function getPlayerSide(boardEl = getBoardElement()) {
   if (!boardEl) return null;
 
+  const explicitFlip = getExplicitBoardFlipState(boardEl);
+  if (explicitFlip === true) return 'b';
+  if (explicitFlip === false) return 'w';
+
+  return null;
+}
+
+function shouldDisplayBestMoveArrow(boardEl = getBoardElement(), fen = lastEvalFen) {
+  if (!boardEl || !fen) return true;
+
+  const fenTurn = normalizeTurn(fen.split(' ')[1]);
   const orientation = (
     boardEl.getAttribute?.('orientation') ||
     boardEl.getAttribute?.('data-orientation') ||
@@ -861,6 +898,7 @@ function syncBestMoveOverlay() {
 
   const boardEl = getBoardElement();
   if (!boardEl) return hideBestMoveOverlay();
+  if (!shouldDisplayBestMoveArrow(boardEl, lastEvalFen)) return hideBestMoveOverlay();
   if (!shouldDisplayBestMoveArrow(boardEl)) return hideBestMoveOverlay();
 
   const rect = boardEl.getBoundingClientRect();
@@ -1053,6 +1091,9 @@ async function tickEvalBar() {
   const fen = getFenFromPage();
 
   if (!fen) {
+    evalRequestSeq++;
+    lastEvalFen = null;
+    bar.querySelector('[data-cse-part="score"]').textContent = '?';
     lastEvalFen = null;
     bar.querySelector('#cse-eval-score').textContent = '?';
     bar.title = 'Posizione non trovata sulla board';
