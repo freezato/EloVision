@@ -255,6 +255,7 @@ let arrowsEnabled = true; // Toggle per le frecce
 const STOCKFISH_ONLINE_DEPTH = 15;
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
+const EVAL_CACHE_TTL = 12 * 1000;
 
 // ── FEN extraction ────────────────────────────────────────────
 
@@ -658,12 +659,32 @@ function fenFromPieces() {
 
 // ── Stockfish eval API ────────────────────────────────────────
 let evalAbortController = null;
+const evalCache = new Map();
+let evalRequestSeq = 0;
+
+function getCachedEval(fen) {
+  const entry = evalCache.get(fen);
+  if (!entry) return null;
+  if (now() - entry.ts > EVAL_CACHE_TTL) {
+    evalCache.delete(fen);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedEval(fen, value) {
+  evalCache.set(fen, { ts: now(), value });
+}
 
 async function fetchEval(fen) {
+  const cached = getCachedEval(fen);
+  if (cached) return cached;
+
   // Cancel any in-flight request for a previous position
   if (evalAbortController) evalAbortController.abort();
   evalAbortController = new AbortController();
   const signal = evalAbortController.signal;
+  const turn = fen.split(' ')[1] || 'w';
 
   // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
@@ -674,10 +695,17 @@ async function fetchEval(fen) {
       if (data.success) {
         const bestMove = extractUciMove(data.bestmove);
         if (data.mate !== null && data.mate !== undefined && data.mate !== 0) {
-          return { cp: null, mate: data.mate, bestMove };
+          const result = { cp: null, mate: turn === 'w' ? data.mate : -data.mate, bestMove };
+          setCachedEval(fen, result);
+          return result;
         }
-        const cp = Math.round(parseFloat(data.evaluation) * 100);
-        if (!isNaN(cp)) return { cp, mate: null, bestMove };
+        const cpRaw = Math.round(parseFloat(data.evaluation) * 100);
+        const cp = turn === 'w' ? cpRaw : -cpRaw;
+        if (!isNaN(cp)) {
+          const result = { cp, mate: null, bestMove };
+          setCachedEval(fen, result);
+          return result;
+        }
       }
     }
   } catch (e) {
@@ -692,10 +720,17 @@ async function fetchEval(fen) {
       const data = await res.json();
       const pv = data.pvs && data.pvs[0];
       if (pv) {
-        const turn = fen.split(' ')[1] || 'w';
         const bestMove = extractUciMove(pv.moves);
-        if (pv.mate !== undefined) return { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove };
-        if (pv.cp  !== undefined) return { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove };
+        if (pv.mate !== undefined) {
+          const result = { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove };
+          setCachedEval(fen, result);
+          return result;
+        }
+        if (pv.cp  !== undefined) {
+          const result = { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove };
+          setCachedEval(fen, result);
+          return result;
+        }
       }
     }
   } catch (e) {
@@ -1002,6 +1037,7 @@ function makeEvalBarDraggable(bar) {
 
 function removeEvalBar() {
   if (evalUpdateInterval) { clearInterval(evalUpdateInterval); evalUpdateInterval = null; }
+  evalRequestSeq++;
   if (evalBarPanel) { evalBarPanel.remove(); evalBarPanel = null; }
   clearBestMoveOverlay();
   lastEvalFen = null;
@@ -1029,16 +1065,16 @@ async function tickEvalBar() {
     return;
   }
   lastEvalFen = fen;
+  const requestSeq = ++evalRequestSeq;
   bar.title = '';
 
   // Show "calculating" state immediately
   const scoreEl = bar.querySelector('[data-cse-part="score"]');
   scoreEl.textContent = '…';
   scoreEl.className = 'cse-eval-score cse-eval-thinking';
-  clearBestMoveOverlay();
 
   const result = await fetchEval(fen);
-  if (result === null && lastEvalFen !== fen) return; // aborted, newer position coming
+  if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
   updateEvalBarDisplay(result);
 }
 
@@ -1051,7 +1087,7 @@ function toggleEvalBar() {
   createEvalBar();
   if (btn) btn.classList.add('cse-eval-active');
   tickEvalBar();
-  evalUpdateInterval = setInterval(tickEvalBar, 1500);
+  evalUpdateInterval = setInterval(tickEvalBar, 1000);
 }
 
 // ─── Eval Toggle Button ────────────────────────────────────────────────────────
@@ -1062,7 +1098,7 @@ function injectEvalToggleButton() {
   const btn = document.createElement('button');
   btn.className = 'cse-eval-toggle-btn';
   btn.title = 'Mostra/nascondi Evaluation Bar';
-  btn.textContent = String.fromCharCode(0x1F4CA) + ' Eval';  // 📊
+  btn.textContent = '🧠 Eval';
   btn.addEventListener('click', toggleEvalBar);
   document.body.appendChild(btn);
   evalToggleBtn = btn;
@@ -1077,7 +1113,7 @@ function addStatsButton(usernameEl, username) {
   const btn = document.createElement('button');
   btn.className = 'cse-btn';
   btn.title = `Mostra statistiche di ${username}`;
-  btn.textContent = '📊';
+  btn.textContent = '📈';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -1125,7 +1161,7 @@ function injectArrowsToggleButton() {
   const btn = document.createElement('button');
   btn.className = 'cse-arrows-toggle-btn cse-arrows-active';
   btn.title = 'Mostra/nascondi frecce della miglior mossa';
-  btn.textContent = '➜ Arrows';
+  btn.textContent = '➤ Arrows';
   btn.addEventListener('click', () => {
     arrowsEnabled = !arrowsEnabled;
     btn.classList.toggle('cse-arrows-active', arrowsEnabled);
