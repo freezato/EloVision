@@ -703,15 +703,29 @@ function extractUciMove(text) {
 }
 
 function getBoardElement() {
-  const boards = Array.from(document.querySelectorAll('chess-board, wc-chess-board, .board-layout-chessboard'));
-  return boards.find(el => {
+  const boardCandidates = Array.from(document.querySelectorAll('chess-board, wc-chess-board'));
+  const directBoard = boardCandidates.find(el => {
     try {
       const rect = el.getBoundingClientRect();
       return rect.width > 40 && rect.height > 40;
     } catch {
       return false;
     }
-  }) || null;
+  });
+  if (directBoard) return directBoard;
+
+  // Fallback: locate the board inside layout containers (if chess.com changes markup).
+  const containers = Array.from(document.querySelectorAll('.board-layout-chessboard'));
+  for (const container of containers) {
+    const nested = container.querySelector('chess-board, wc-chess-board');
+    if (!nested) continue;
+    try {
+      const rect = nested.getBoundingClientRect();
+      if (rect.width > 40 && rect.height > 40) return nested;
+    } catch {}
+  }
+
+  return null;
 }
 
 function isBoardFlipped(boardEl = getBoardElement()) {
@@ -773,11 +787,36 @@ function clearBestMoveOverlay() {
   hideBestMoveOverlay();
 }
 
+function getPlayerSide(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
+
+  const orientation = (
+    boardEl.getAttribute?.('orientation') ||
+    boardEl.getAttribute?.('data-orientation') ||
+    boardEl.dataset?.orientation ||
+    ''
+  ).toLowerCase();
+  if (orientation === 'white' || orientation === 'w') return 'w';
+  if (orientation === 'black' || orientation === 'b') return 'b';
+
+  return isBoardFlipped(boardEl) ? 'b' : 'w';
+}
+
+function shouldDisplayBestMoveArrow(boardEl = getBoardElement()) {
+  if (!boardEl || !lastEvalFen) return true;
+
+  const fenTurn = normalizeTurn(lastEvalFen.split(' ')[1]);
+  const playerSide = getPlayerSide(boardEl);
+  if (!fenTurn || !playerSide) return true;
+  return fenTurn === playerSide;
+}
+
 function syncBestMoveOverlay() {
   if (!arrowsEnabled || !currentBestMove) return hideBestMoveOverlay();
 
   const boardEl = getBoardElement();
   if (!boardEl) return hideBestMoveOverlay();
+  if (!shouldDisplayBestMoveArrow(boardEl)) return hideBestMoveOverlay();
 
   const rect = boardEl.getBoundingClientRect();
   if (rect.width < 40 || rect.height < 40) return hideBestMoveOverlay();
@@ -815,8 +854,9 @@ function syncBestMoveOverlay() {
   const x2p = x2 - ux * padding;
   const y2p = y2 - uy * padding;
   const radius = Math.max(3, start.cell * 0.18);
-  const headLength = Math.max(12, start.cell * 0.3);
-  const headWidth = Math.max(10, start.cell * 0.25);
+  const lineWidth = Math.max(6, start.cell * 0.26);
+  const headLength = Math.max(10, start.cell * 0.38);
+  const headWidth = Math.max(8, start.cell * 0.2);
   const baseX = x2 - ux * headLength;
   const baseY = y2 - uy * headLength;
   const perpX = -uy;
@@ -827,6 +867,7 @@ function syncBestMoveOverlay() {
   const rightY = baseY - perpY * headWidth;
 
   svg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
+  line.setAttribute('stroke-width', String(lineWidth));
   line.setAttribute('x1', x1p);
   line.setAttribute('y1', y1p);
   line.setAttribute('x2', x2p);
@@ -967,6 +1008,7 @@ async function tickEvalBar() {
   const fen = getFenFromPage();
 
   if (!fen) {
+    lastEvalFen = null;
     bar.querySelector('#cse-eval-score').textContent = '?';
     bar.title = 'Posizione non trovata sulla board';
     hideBestMoveOverlay();
