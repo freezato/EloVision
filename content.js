@@ -1053,9 +1053,8 @@ async function tickEvalBar() {
   const fen = getFenFromPage();
 
   if (!fen) {
-    evalRequestSeq++;
     lastEvalFen = null;
-    bar.querySelector('[data-cse-part="score"]').textContent = '?';
+    bar.querySelector('#cse-eval-score').textContent = '?';
     bar.title = 'Posizione non trovata sulla board';
     hideBestMoveOverlay();
     return;
