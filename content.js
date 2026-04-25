@@ -3,6 +3,8 @@
 
 const CACHE = {};
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const panelByUsername = new Map();
+const injectedUsernameEls = new WeakSet();
 
 // ─── Utility ────────────────────────────────────────────────────────────────
 
@@ -103,7 +105,6 @@ function getCurrentRating(stats) {
 function createPanel(username) {
   const panel = document.createElement('div');
   panel.className = 'cse-panel';
-  panel.id = `cse-panel-${username}`;
   panel.innerHTML = `
     <div class="cse-header">
       <span class="cse-title">♟ <a href="https://www.chess.com/member/${username}" target="_blank">${username}</a></span>
@@ -115,9 +116,13 @@ function createPanel(username) {
     </div>
     <div class="cse-content" style="display:none"></div>
   `;
-  panel.querySelector('.cse-close').addEventListener('click', () => panel.remove());
+  panel.querySelector('.cse-close').addEventListener('click', () => {
+    panelByUsername.delete(username);
+    panel.remove();
+  });
   document.body.appendChild(panel);
   makeDraggable(panel);
+  panelByUsername.set(username, panel);
   return panel;
 }
 
@@ -206,8 +211,11 @@ function makeDraggable(el) {
 // ─── Main Logic ───────────────────────────────────────────────────────────────
 
 async function loadStatsForUser(username) {
-  const existingPanel = document.getElementById(`cse-panel-${username}`);
-  if (existingPanel) { existingPanel.remove(); }
+  const existingPanel = panelByUsername.get(username);
+  if (existingPanel) {
+    existingPanel.remove();
+    panelByUsername.delete(username);
+  }
 
   const panel = createPanel(username);
 
@@ -241,6 +249,8 @@ let evalUpdateInterval = null;
 let lastEvalFen = null;
 let currentBestMove = null;
 let bestMoveOverlay = null;
+let evalToggleBtn = null;
+let arrowsToggleBtn = null;
 let arrowsEnabled = true; // Toggle per le frecce
 const STOCKFISH_ONLINE_DEPTH = 15;
 const FEN_SEARCH_MAX_DEPTH = 3;
@@ -765,12 +775,12 @@ function ensureBestMoveOverlay() {
   if (bestMoveOverlay && bestMoveOverlay.isConnected) return bestMoveOverlay;
 
   const overlay = document.createElement('div');
-  overlay.id = 'cse-bestmove-overlay';
+  overlay.className = 'cse-bestmove-overlay';
   overlay.innerHTML = `
     <svg class="cse-bestmove-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
-      <line id="cse-bestmove-line" x1="0" y1="0" x2="0" y2="0"></line>
-      <circle id="cse-bestmove-start" cx="0" cy="0" r="0"></circle>
-      <polygon id="cse-bestmove-head" points="0,0 0,0 0,0"></polygon>
+      <line class="cse-bestmove-line" x1="0" y1="0" x2="0" y2="0"></line>
+      <circle class="cse-bestmove-start" cx="0" cy="0" r="0"></circle>
+      <polygon class="cse-bestmove-head" points="0,0 0,0 0,0"></polygon>
     </svg>
   `;
   document.body.appendChild(overlay);
@@ -830,9 +840,9 @@ function syncBestMoveOverlay() {
 
   const overlay = ensureBestMoveOverlay();
   const svg = overlay.querySelector('.cse-bestmove-svg');
-  const line = overlay.querySelector('#cse-bestmove-line');
-  const startCircle = overlay.querySelector('#cse-bestmove-start');
-  const head = overlay.querySelector('#cse-bestmove-head');
+  const line = overlay.querySelector('.cse-bestmove-line');
+  const startCircle = overlay.querySelector('.cse-bestmove-start');
+  const head = overlay.querySelector('.cse-bestmove-head');
 
   overlay.style.left = rect.left + 'px';
   overlay.style.top = rect.top + 'px';
@@ -893,12 +903,12 @@ function cpToWhitePct(cp) {
 }
 
 function updateEvalBarDisplay(result) {
-  const bar = document.getElementById('cse-eval-bar');
+  const bar = evalBarPanel;
   if (!bar) return;
 
-  const blackSeg = bar.querySelector('#cse-eval-black-seg');
-  const whiteSeg = bar.querySelector('#cse-eval-white-seg');
-  const scoreEl  = bar.querySelector('#cse-eval-score');
+  const blackSeg = bar.querySelector('[data-cse-part="black"]');
+  const whiteSeg = bar.querySelector('[data-cse-part="white"]');
+  const scoreEl  = bar.querySelector('[data-cse-part="score"]');
 
   if (!result) {
     // Could not get eval — show neutral + error indicator
@@ -941,14 +951,14 @@ function createEvalBar() {
   if (evalBarPanel) return evalBarPanel;
 
   const bar = document.createElement('div');
-  bar.id = 'cse-eval-bar';
+  bar.className = 'cse-eval-bar-root';
   bar.innerHTML = `
     <div class="cse-eval-drag-handle" id="cse-eval-drag" title="Trascina per spostare">⠿</div>
     <div class="cse-eval-inner" id="cse-eval-inner">
-      <div class="cse-eval-black" id="cse-eval-black-seg" style="height:50%"></div>
-      <div class="cse-eval-white" id="cse-eval-white-seg" style="height:50%"></div>
+      <div class="cse-eval-black" data-cse-part="black" style="height:50%"></div>
+      <div class="cse-eval-white" data-cse-part="white" style="height:50%"></div>
     </div>
-    <div class="cse-eval-score" id="cse-eval-score">…</div>
+    <div class="cse-eval-score" data-cse-part="score">…</div>
     <div class="cse-eval-label">Eval</div>
     <button class="cse-eval-close" id="cse-eval-close-btn" title="Chiudi">✕</button>
   `;
@@ -995,14 +1005,13 @@ function removeEvalBar() {
   if (evalBarPanel) { evalBarPanel.remove(); evalBarPanel = null; }
   clearBestMoveOverlay();
   lastEvalFen = null;
-  const btn = document.getElementById('cse-eval-toggle-btn');
-  if (btn) btn.classList.remove('cse-eval-active');
+  if (evalToggleBtn) evalToggleBtn.classList.remove('cse-eval-active');
 }
 
 let evalPending = false;
 
 async function tickEvalBar() {
-  const bar = document.getElementById('cse-eval-bar');
+  const bar = evalBarPanel;
   if (!bar) return;
 
   const fen = getFenFromPage();
@@ -1023,7 +1032,7 @@ async function tickEvalBar() {
   bar.title = '';
 
   // Show "calculating" state immediately
-  const scoreEl = bar.querySelector('#cse-eval-score');
+  const scoreEl = bar.querySelector('[data-cse-part="score"]');
   scoreEl.textContent = '…';
   scoreEl.className = 'cse-eval-score cse-eval-thinking';
   clearBestMoveOverlay();
@@ -1034,8 +1043,8 @@ async function tickEvalBar() {
 }
 
 function toggleEvalBar() {
-  const btn = document.getElementById('cse-eval-toggle-btn');
-  if (evalBarPanel && document.getElementById('cse-eval-bar')) {
+  const btn = evalToggleBtn;
+  if (evalBarPanel?.isConnected) {
     removeEvalBar();
     return;
   }
@@ -1048,22 +1057,22 @@ function toggleEvalBar() {
 // ─── Eval Toggle Button ────────────────────────────────────────────────────────
 
 function injectEvalToggleButton() {
-  if (document.getElementById('cse-eval-toggle-btn')) return;
+  if (evalToggleBtn?.isConnected) return;
 
   const btn = document.createElement('button');
-  btn.id = 'cse-eval-toggle-btn';
   btn.className = 'cse-eval-toggle-btn';
   btn.title = 'Mostra/nascondi Evaluation Bar';
   btn.textContent = String.fromCharCode(0x1F4CA) + ' Eval';  // 📊
   btn.addEventListener('click', toggleEvalBar);
   document.body.appendChild(btn);
+  evalToggleBtn = btn;
 }
 
 // ─── Inject Buttons ───────────────────────────────────────────────────────────
 
 function addStatsButton(usernameEl, username) {
-  if (!username || usernameEl.dataset.cseInjected) return;
-  usernameEl.dataset.cseInjected = '1';
+  if (!username || injectedUsernameEls.has(usernameEl)) return;
+  injectedUsernameEls.add(usernameEl);
 
   const btn = document.createElement('button');
   btn.className = 'cse-btn';
@@ -1111,10 +1120,9 @@ function scanAndInject() {
 // ─── Observer ────────────────────────────────────────────────────────────────
 
 function injectArrowsToggleButton() {
-  if (document.getElementById('cse-arrows-toggle-btn')) return;
+  if (arrowsToggleBtn?.isConnected) return;
 
   const btn = document.createElement('button');
-  btn.id = 'cse-arrows-toggle-btn';
   btn.className = 'cse-arrows-toggle-btn cse-arrows-active';
   btn.title = 'Mostra/nascondi frecce della miglior mossa';
   btn.textContent = '➜ Arrows';
@@ -1125,6 +1133,7 @@ function injectArrowsToggleButton() {
     else syncBestMoveOverlay();
   });
   document.body.appendChild(btn);
+  arrowsToggleBtn = btn;
 }
 
 function scanAndInjectEval() {
