@@ -1060,6 +1060,17 @@ async function tickEvalBar() {
     return;
   }
 
+  const boardEl = getBoardElement();
+  if (boardEl && !shouldDisplayBestMoveArrow(boardEl, fen)) {
+    evalRequestSeq++;
+    lastEvalFen = fen;
+    bar.querySelector('[data-cse-part="score"]').textContent = '⏸';
+    bar.querySelector('[data-cse-part="score"]').className = 'cse-eval-score';
+    bar.title = 'In attesa del tuo turno';
+    clearBestMoveOverlay();
+    return;
+  }
+
   if (fen === lastEvalFen) {
     syncBestMoveOverlay();
     return;
