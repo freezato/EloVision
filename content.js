@@ -256,6 +256,8 @@ let toolsModal = null;
 let guiRefreshInterval = null;
 let arrowsEnabled = true; // Toggle per le frecce
 let isEvalBarEnabled = false;
+let isGuiHudEnabled = false;
+let guiHudPanel = null;
 let automoveMode = 'blatant'; // 'blatant' | 'legit'
 let automoveDelayMin = 1;  // seconds (user configurable)
 let automoveDelayMax = 5;  // seconds (user configurable)
@@ -285,6 +287,7 @@ function cseSaveState() {
       AutoMove: !!isAutomoveEnabled,
       SuggestMove: !!arrowsEnabled,
       EvaluationBar: !!isEvalBarEnabled,
+      GUI: !!isGuiHudEnabled,
     },
     settings: {
       automoveMode,
@@ -828,14 +831,16 @@ function clearAutomoveSchedule(clearTimer = true) {
 }
 
 function updateAutomoveButtonState() {
-  const timerEl = document.getElementById('cse-automove-timer');
+  const timerEl = document.getElementById('cse-mc-timer-badge');
   if (timerEl) {
-    if (!isAutomoveEnabled) { timerEl.textContent = ''; return; }
-    if (!automoveScheduledAt || automoveDelayMs <= 0) { timerEl.textContent = ''; return; }
-    const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
-    timerEl.textContent = `(${(remainingMs / 1000).toFixed(1)}s)`;
+    if (!isAutomoveEnabled || !automoveScheduledAt || automoveDelayMs <= 0) {
+      timerEl.textContent = '';
+    } else {
+      const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
+      timerEl.textContent = 'ETA ' + (remainingMs / 1000).toFixed(1) + 's';
+    }
   }
-  if (toolsModal?.isConnected) cseRenderGui();
+  if (isGuiHudEnabled) syncGuiHudPanel();
 }
 
 function startAutomoveUiTicker() {
@@ -886,7 +891,9 @@ function executeAutomoveMove(bestMove) {
   }
 
   const dispatchAtPoint = (type, pt, buttons = 0) => {
-    const target = document.elementFromPoint(pt.x, pt.y) || boardEl;
+    const rawTarget = document.elementFromPoint(pt.x, pt.y);
+    const isInsideBoard = !!(rawTarget && (rawTarget === boardEl || boardEl.contains(rawTarget)));
+    const target = isInsideBoard ? rawTarget : boardEl;
     if (!target) return false;
     const evt = new MouseEvent(type, {
       bubbles: true,
@@ -935,6 +942,38 @@ async function performAutomove() {
   const playerSide = getPlayerSide(boardEl);
   const turn = detectSideToMove();
   const bestMove = getAutomoveCandidateMove();
+  const hasPlannedForCurrentFen = !!(automoveTimeout && automoveTargetFen === lastEvalFen && automovePlannedMove);
+
+  // Keep an already planned move stable for the same FEN to avoid countdown resets
+  // (especially in legit mode where candidate can change every eval tick).
+  if (hasPlannedForCurrentFen) {
+    const plannedBlocked = isAutomoveBlockedFor(automoveTargetFen, automovePlannedMove);
+    const plannedPlayable = isMovePlayableNow(automovePlannedMove, automoveTargetFen);
+    const turnMismatch = !!(playerSide && turn && playerSide !== turn);
+
+    if (!plannedBlocked && plannedPlayable && !turnMismatch) {
+      updateAutomoveButtonState();
+      return;
+    }
+
+    if (turnMismatch) {
+      automoveLog('cancel: planned move dropped because turn changed', {
+        playerSide,
+        turn,
+        move: automovePlannedMove
+      });
+      clearAutomoveSchedule();
+      return;
+    }
+
+    automoveLog('reschedule: planned move no longer valid', {
+      move: automovePlannedMove,
+      plannedBlocked,
+      plannedPlayable
+    });
+    clearAutomoveSchedule(false);
+  }
+
   if (playerSide !== turn || !bestMove || !lastEvalFen || !isMovePlayableNow(bestMove, lastEvalFen)) {
     automoveLog('cancel: preconditions', {
       playerSide,
@@ -954,11 +993,7 @@ async function performAutomove() {
     return;
   }
 
-  const needsReschedule = (
-    !automoveTimeout ||
-    automoveTargetFen !== lastEvalFen ||
-    automovePlannedMove !== bestMove
-  );
+  const needsReschedule = !automoveTimeout || automoveTargetFen !== lastEvalFen;
   if (!needsReschedule) {
     updateAutomoveButtonState();
     return;
@@ -1867,7 +1902,7 @@ function updateEvalBarDisplay(result) {
 }
 const cseGuiState = {
   activeTab: 'ALL',
-  favorites: { AutoMove: false, SuggestMove: false, EvaluationBar: false },
+  favorites: { AutoMove: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
 };
 
@@ -1881,6 +1916,7 @@ function applySavedGuiAndModuleState() {
       AutoMove: !!saved.favorites.AutoMove,
       SuggestMove: !!saved.favorites.SuggestMove,
       EvaluationBar: !!saved.favorites.EvaluationBar,
+      GUI: !!saved.favorites.GUI,
     };
   }
 
@@ -1892,6 +1928,7 @@ function applySavedGuiAndModuleState() {
     isAutomoveEnabled = !!saved.modules.AutoMove;
     arrowsEnabled = !!saved.modules.SuggestMove;
     isEvalBarEnabled = !!saved.modules.EvaluationBar;
+    isGuiHudEnabled = !!saved.modules.GUI;
   }
 
   if (saved.settings && typeof saved.settings === 'object') {
@@ -1951,15 +1988,66 @@ function ensureEvalEngineState(forceTick = false) {
   if (forceTick) tickEvalBar();
 }
 
+function getActiveModuleHudEntries() {
+  const entries = [];
+  if (isAutomoveEnabled) {
+    let timer = '';
+    if (automoveScheduledAt && automoveDelayMs > 0) {
+      const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
+      timer = 'ETA ' + (remainingMs / 1000).toFixed(1) + 's';
+    }
+    entries.push({
+      key: 'AutoMove|' + timer,
+      html: `AutoMove${timer ? ` <span class="cse-gui-hud-timer">${timer}</span>` : ''}`,
+    });
+  }
+  if (arrowsEnabled) entries.push({ key: 'SuggestMove', html: 'SuggestMove' });
+  if (isEvalBarEnabled) entries.push({ key: 'EvaluationBar', html: 'EvaluationBar' });
+  if (isGuiHudEnabled) entries.push({ key: 'GUI', html: 'GUI' });
+  return entries;
+}
+
+function removeGuiHudPanel() {
+  if (guiHudPanel?.isConnected) guiHudPanel.remove();
+  guiHudPanel = null;
+}
+
+function ensureGuiHudPanel() {
+  if (guiHudPanel?.isConnected) return guiHudPanel;
+  const panel = document.createElement('div');
+  panel.className = 'cse-gui-hud';
+  panel.innerHTML = '<div class="cse-gui-hud-list"></div>';
+  document.body.appendChild(panel);
+  guiHudPanel = panel;
+  return panel;
+}
+
+function syncGuiHudPanel() {
+  if (!isGuiHudEnabled) {
+    removeGuiHudPanel();
+    return;
+  }
+  const panel = ensureGuiHudPanel();
+  const list = panel.querySelector('.cse-gui-hud-list');
+  if (!list) return;
+  const entries = getActiveModuleHudEntries();
+  const safeEntries = entries.length ? entries : [{ key: 'GUI', html: 'GUI' }];
+  const signature = safeEntries.map(e => e.key).join('|');
+  if (list.dataset.cseSignature === signature) return;
+  list.dataset.cseSignature = signature;
+  list.innerHTML = safeEntries.map(e => `<div class="cse-gui-hud-item">${e.html}</div>`).join('');
+}
+
 function cseRenderGui() {
   const modal = document.getElementById('cse-mc-gui');
   if (!modal) return;
   const tab = cseGuiState.activeTab;
 
   const mods = [
-    { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled },
-    { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled },
-    { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled },
+    { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled, hasSettings: true },
+    { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
+    { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
+    { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
   ].filter(m => tab === 'ALL' || (tab === 'FAVORITE' && cseGuiState.favorites[m.id]));
 
   modal.querySelectorAll('.cse-mc-tab').forEach(t => {
@@ -1986,6 +2074,7 @@ function cseRenderGui() {
       AutoMove: { letter: 'A', color: '#4a9e5c' },
       SuggestMove: { letter: 'S', color: '#5b8fc9' },
       EvaluationBar: { letter: 'E', color: '#b58a4a' },
+      GUI: { letter: 'G', color: '#d8d8d8' },
     };
     const icon = iconMap[mod.id] || { letter: '?', color: '#888' };
 
@@ -1996,9 +2085,9 @@ function cseRenderGui() {
           <div class="cse-mc-toggle ${mod.active ? 'cse-mc-on' : ''}" data-id="${mod.id}">
             <div class="cse-mc-knob"></div>
           </div>
-          <div class="cse-mc-dots" data-id="${mod.id}" title="Settings">
+          ${mod.hasSettings ? `<div class="cse-mc-dots" data-id="${mod.id}" title="Settings">
             <span></span><span></span><span></span>
-          </div>
+          </div>` : '<div class="cse-mc-dots cse-mc-dots-disabled" title="No settings"><span></span><span></span><span></span></div>'}
         </div>
       </div>
       <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' && isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-badge"></span>' : ''}</div>
@@ -2021,20 +2110,27 @@ function cseRenderGui() {
         isEvalBarEnabled = !isEvalBarEnabled;
         if (isEvalBarEnabled) createEvaluationBarPanel();
         else removeEvaluationBarPanel();
+      } else if (mod.id === 'GUI') {
+        isGuiHudEnabled = !isGuiHudEnabled;
+        syncGuiHudPanel();
       }
 
       ensureEvalEngineState(true);
       if (isAutomoveEnabled) performAutomove();
       updateAutomoveButtonState();
+      syncGuiHudPanel();
       cseSaveState();
       cseRenderGui();
     });
 
-    card.querySelector('.cse-mc-dots').addEventListener('click', e => {
-      e.stopPropagation();
-      cseGuiState.openSettings = mod.id;
-      cseRenderSettingsPanel(mod.id);
-    });
+    const dots = card.querySelector('.cse-mc-dots');
+    if (mod.hasSettings && dots) {
+      dots.addEventListener('click', e => {
+        e.stopPropagation();
+        cseGuiState.openSettings = mod.id;
+        cseRenderSettingsPanel(mod.id);
+      });
+    }
 
     card.querySelector('.cse-mc-fav').addEventListener('click', e => {
       e.stopPropagation();
@@ -2046,19 +2142,14 @@ function cseRenderGui() {
     grid.appendChild(card);
   });
 
-  if (isAutomoveEnabled && automoveScheduledAt && automoveDelayMs > 0) {
-    const badge = document.getElementById('cse-mc-timer-badge');
-    if (badge) {
-      const rem = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
-      badge.textContent = ' (' + (rem / 1000).toFixed(1) + 's)';
-    }
-  }
+  updateAutomoveButtonState();
 
   if (cseGuiState.openSettings && !mods.find(m => m.id === cseGuiState.openSettings)) {
     cseGuiState.openSettings = null;
     const ov = modal.querySelector('#cse-mc-settings-overlay');
     if (ov) ov.style.display = 'none';
   }
+  syncGuiHudPanel();
 }
 
 function cseRenderSettingsPanel(modId) {
@@ -2066,9 +2157,10 @@ function cseRenderSettingsPanel(modId) {
   if (!modal) return;
   const ov = modal.querySelector('#cse-mc-settings-overlay');
   if (!ov) return;
-  ov.style.display = 'flex';
+  ov.style.display = 'block';
 
   const isAuto = modId === 'AutoMove';
+  const isDepth = modId === 'SuggestMove' || modId === 'EvaluationBar';
   ov.innerHTML = `
     <div class="cse-mc-spanel">
       <div class="cse-mc-spanel-header">
@@ -2091,10 +2183,14 @@ function cseRenderSettingsPanel(modId) {
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay max</span><span class="cse-mc-sval" id="cse-sp-dmax-val">${automoveDelayMax}s</span></div>
           <input type="range" class="cse-mc-slider" id="cse-sp-dmax" min="1" max="15" step="1" value="${automoveDelayMax}">
         </div>
-      ` : `
+      ` : isDepth ? `
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-depth-val">${suggestMoveDepth}</span></div>
           <input type="range" class="cse-mc-slider" id="cse-sp-depth" min="1" max="15" step="1" value="${suggestMoveDepth}">
+        </div>
+      ` : `
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">No settings for this module.</span>
         </div>
       `}
     </div>
@@ -2103,6 +2199,69 @@ function cseRenderSettingsPanel(modId) {
   ov.querySelector('#cse-mc-sp-close').addEventListener('click', () => {
     ov.style.display = 'none';
     cseGuiState.openSettings = null;
+  });
+
+  // Draggable settings panel
+  const panel = ov.querySelector('.cse-mc-spanel');
+  const header = ov.querySelector('.cse-mc-spanel-header');
+  let dragPointerId = null;
+  let dX = 0;
+  let dY = 0;
+  let dL = 0;
+  let dT = 0;
+
+  const clampPanel = (left, top) => {
+    const pad = 8;
+    const maxLeft = Math.max(pad, ov.clientWidth - panel.offsetWidth - pad);
+    const maxTop = Math.max(pad, ov.clientHeight - panel.offsetHeight - pad);
+    return {
+      left: Math.min(Math.max(pad, left), maxLeft),
+      top: Math.min(Math.max(pad, top), maxTop),
+    };
+  };
+
+  const onPointerMove = e => {
+    if (e.pointerId !== dragPointerId) return;
+    const next = clampPanel(dL + e.clientX - dX, dT + e.clientY - dY);
+    panel.style.left = next.left + 'px';
+    panel.style.top = next.top + 'px';
+  };
+
+  const stopDrag = () => {
+    if (dragPointerId !== null && header.hasPointerCapture(dragPointerId)) header.releasePointerCapture(dragPointerId);
+    dragPointerId = null;
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', stopDrag);
+    window.removeEventListener('pointercancel', stopDrag);
+  };
+
+  header.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('#cse-mc-sp-close')) return;
+    e.preventDefault();
+    const ovRect = ov.getBoundingClientRect();
+    const pRect = panel.getBoundingClientRect();
+
+    panel.style.position = 'absolute';
+    panel.style.margin = '0';
+    panel.style.left = (pRect.left - ovRect.left) + 'px';
+    panel.style.top = (pRect.top - ovRect.top) + 'px';
+    panel.style.transform = 'none';
+
+    dX = e.clientX;
+    dY = e.clientY;
+    dL = pRect.left - ovRect.left;
+    dT = pRect.top - ovRect.top;
+    dragPointerId = e.pointerId;
+
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grabbing';
+    header.setPointerCapture(e.pointerId);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopDrag);
+    window.addEventListener('pointercancel', stopDrag);
   });
 
   if (isAuto) {
@@ -2137,8 +2296,9 @@ function cseRenderSettingsPanel(modId) {
       ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
       cseSaveState();
     });
-  } else {
+  } else if (isDepth) {
     const depSl = ov.querySelector('#cse-sp-depth');
+    if (!depSl) return;
     depSl.addEventListener('input', () => {
       suggestMoveDepth = parseInt(depSl.value, 10);
       ov.querySelector('#cse-sp-depth-val').textContent = suggestMoveDepth;
@@ -2317,13 +2477,7 @@ function createToolsGui() {
   if (guiRefreshInterval) clearInterval(guiRefreshInterval);
   guiRefreshInterval = setInterval(() => {
     if (!toolsModal?.isConnected) return;
-    const badge = document.getElementById('cse-mc-timer-badge');
-    if (!badge || !isAutomoveEnabled || !automoveScheduledAt || automoveDelayMs <= 0) {
-      if (badge) badge.textContent = '';
-      return;
-    }
-    const rem = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
-    badge.textContent = ' (' + (rem / 1000).toFixed(1) + 's)';
+    updateAutomoveButtonState();
   }, 100);
 
   return modal;
@@ -2478,11 +2632,17 @@ document.addEventListener('keydown', e => {
   }
 });
 
-const observer = new MutationObserver(() => { scanAndInject(); scanAndInjectEval(); syncBestMoveOverlay(); });
+const observer = new MutationObserver(() => {
+  scanAndInject();
+  scanAndInjectEval();
+  syncBestMoveOverlay();
+  if (isGuiHudEnabled && (!guiHudPanel || !guiHudPanel.isConnected)) syncGuiHudPanel();
+});
 observer.observe(document.body, { childList: true, subtree: true });
 applySavedGuiAndModuleState();
 if (isEvalBarEnabled) createEvaluationBarPanel();
 if (isAutomoveEnabled) startAutomoveUiTicker();
+syncGuiHudPanel();
 ensureEvalEngineState(true);
 cseSaveState();
 scanAndInject();
