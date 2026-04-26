@@ -432,6 +432,10 @@ function findTurnInObject(root, maxDepth = 2, maxNodes = 120) {
 
 // ── Active clock detection (most reliable for live online games) ──────────────
 // chess.com adds 'clock-player-turn' to the clock element of whoever is to move.
+// IMPORTANT: This function must NOT call getPlayerSide() or getExplicitBoardFlipState()
+// because both internally call inferPlayerSideFromClockAndTurn → detectSideToMove → here,
+// causing infinite recursion (Maximum call stack size exceeded).
+// Use _detectOrientationColor() directly instead — it has no circular dependency.
 function detectTurnFromActiveClock() {
   // Possible selectors for the currently-ticking clock
   const candidates = [
@@ -445,31 +449,35 @@ function detectTurnFromActiveClock() {
 
   const boardEl = getBoardElement();
   if (!boardEl) return null;
-  const explicitFlip = getExplicitBoardFlipState(boardEl);
-  const playerSide = getPlayerSide(boardEl);
+
+  // Use _detectOrientationColor directly — avoids the circular recursion that
+  // would happen if we called getPlayerSide() or getExplicitBoardFlipState().
+  const playerSide = _detectOrientationColor(boardEl);
 
   for (const clockEl of candidates) {
     const rect = clockEl.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) continue;
 
     // Determine whether this clock is in the bottom half of the viewport.
-    // Bottom = local player's side on a normal (white-at-bottom) board.
-    const boardRect  = boardEl ? boardEl.getBoundingClientRect() : null;
-    const midY       = boardRect
+    const boardRect = boardEl ? boardEl.getBoundingClientRect() : null;
+    const midY      = boardRect
       ? boardRect.top + boardRect.height / 2
       : window.innerHeight / 2;
-    const isBottom   = rect.top + rect.height / 2 > midY;
+    const isBottom  = rect.top + rect.height / 2 > midY;
 
-    // Preferred mapping when board flip is explicitly known.
-    if (explicitFlip !== null) {
-      if (!explicitFlip) return isBottom ? 'w' : 'b';
-      return isBottom ? 'b' : 'w';
-    }
-
-    // Fallback mapping using detected player side.
     if (playerSide) {
+      // Active clock is the side TO MOVE.
+      // If it's at the bottom and I'm white (white = bottom), then white is to move.
+      // If it's at the top and I'm white, then black is to move.
       return isBottom ? playerSide : (playerSide === 'w' ? 'b' : 'w');
     }
+
+    // ── IMPORTANT: Do NOT guess when orientation is unknown. ──
+    // On chess.com the local player is ALWAYS at the bottom regardless of color
+    // (the board flips so black's pieces are also at the bottom when playing black).
+    // Therefore "isBottom=true" tells us nothing about color without knowing orientation.
+    // Return null so other detection methods (ply count, highlights, etc.) can decide.
+    return null;
   }
 
   return null;
@@ -541,19 +549,22 @@ function isElementBottomHalf(el, boardEl = getBoardElement()) {
 }
 
 // Infer local player side using currently active clock position + known side-to-move.
+// IMPORTANT: Do NOT call detectSideToMove() here — that function calls
+// detectTurnFromActiveClock() which calls getPlayerSide() which calls this
+// function, causing infinite recursion. Only use lastEvalFen as source of truth.
 function inferPlayerSideFromClockAndTurn(boardEl = getBoardElement()) {
   const clockEl = getActiveClockElement();
   if (!clockEl) return null;
   const isBottom = isElementBottomHalf(clockEl, boardEl);
   if (isBottom === null) return null;
 
+  // Only rely on lastEvalFen — never call detectSideToMove() here.
   const fenTurn = normalizeTurn((lastEvalFen || '').split(' ')[1]);
-  const turn = fenTurn || detectSideToMove();
-  if (!turn) return null;
+  if (!fenTurn) return null;
 
   // Active clock belongs to side-to-move.
   // If active clock is bottom, local side == turn; otherwise opposite.
-  return isBottom ? turn : (turn === 'w' ? 'b' : 'w');
+  return isBottom ? fenTurn : (fenTurn === 'w' ? 'b' : 'w');
 }
 
 // ── Automove ─────────────────────────────────────────────────────────────────
@@ -564,6 +575,8 @@ let automoveScheduledAt = 0;
 let automoveDelayMs = 0;
 let automovePlannedMove = null;
 let automoveTargetFen = null;
+let automoveBlockedKey = null;
+let automoveBlockedUntil = 0;
 const AUTOMOVE_DEBUG = true;
 let lastLoggedPlayerSide = null;
 let playerSideCache = { side: null, ts: 0 };
@@ -574,6 +587,54 @@ function isSameFenBoardAndTurn(fenA, fenB) {
   const b = String(fenB).trim().split(/\s+/);
   if (a.length < 2 || b.length < 2) return true;
   return a[0] === b[0] && a[1] === b[1];
+}
+
+function getFenBoardAndTurn(fen) {
+  if (!fen || typeof fen !== 'string') return null;
+  const parts = fen.trim().split(/\s+/);
+  if (parts.length < 2 || !expandFenBoard(parts[0]) || !normalizeTurn(parts[1])) return null;
+  return `${parts[0]} ${parts[1]}`;
+}
+
+function makeAutomoveBlockKey(fen, move) {
+  const boardAndTurn = getFenBoardAndTurn(fen);
+  const uci = extractUciMove(move);
+  if (!boardAndTurn || !uci) return null;
+  return `${boardAndTurn}|${uci}`;
+}
+
+function isAutomoveBlockedFor(fen, move) {
+  const key = makeAutomoveBlockKey(fen, move);
+  if (!key) return false;
+  if (automoveBlockedKey !== key) return false;
+  if (now() >= automoveBlockedUntil) {
+    automoveBlockedKey = null;
+    automoveBlockedUntil = 0;
+    return false;
+  }
+  return true;
+}
+
+function blockAutomoveFor(fen, move, ms = 7000) {
+  const key = makeAutomoveBlockKey(fen, move);
+  if (!key) return;
+  automoveBlockedKey = key;
+  automoveBlockedUntil = now() + ms;
+}
+
+function clearAutomoveBlock() {
+  automoveBlockedKey = null;
+  automoveBlockedUntil = 0;
+}
+
+function isMovePlayableNow(move, evalFen = lastEvalFen) {
+  const uci = extractUciMove(move);
+  if (!uci) return false;
+  if (evalFen && !isMoveConsistentWithFen(uci, evalFen)) return false;
+  const boardFen = fenFromPieces();
+  if (!boardFen) return true;
+  if (evalFen && !isSameFenBoardAndTurn(boardFen, evalFen)) return false;
+  return isMoveConsistentWithFen(uci, boardFen);
 }
 
 function sleep(ms) {
@@ -609,7 +670,14 @@ function detectOrientationFromBoardCoordinates(boardEl) {
   }
   if (!rect || rect.width < 80 || rect.height < 80) return null;
 
-  const textNodes = Array.from(document.querySelectorAll('span, div'));
+  // Search both the regular DOM AND the board's shadow root.
+  // chess.com renders rank/file coordinate labels inside the wc-chess-board
+  // shadow DOM, so document.querySelectorAll() alone misses them.
+  const searchRoots = [document, boardEl.shadowRoot].filter(Boolean);
+  const textNodes = [];
+  for (const root of searchRoots) {
+    try { textNodes.push(...Array.from(root.querySelectorAll('span, div, [class*="coordinate"]'))); } catch {}
+  }
 
   // Heuristic 1: top-left rank label.
   let topRank = null;
@@ -691,11 +759,11 @@ function inferPlayerSideFromPieceDistribution(boardEl = getBoardElement()) {
 function getAutomoveCandidateMove() {
   if (lastEvalMoveSourceFen !== lastEvalFen) return null;
   const fallbackRaw = extractUciMove(currentBestMove);
-  const fallback = isMoveConsistentWithFen(fallbackRaw, lastEvalFen) ? fallbackRaw : null;
+  const fallback = isMovePlayableNow(fallbackRaw, lastEvalFen) ? fallbackRaw : null;
   if (automoveMode !== 'legit') return fallback;
   const pool = Array.from(new Set((lastEvalTopMoves || [])
     .map(extractUciMove)
-    .filter(m => isMoveConsistentWithFen(m, lastEvalFen))
+    .filter(m => isMovePlayableNow(m, lastEvalFen))
   )).slice(0, 3);
   if (!pool.length) return fallback;
   return pool[Math.floor(Math.random() * pool.length)] || fallback;
@@ -784,6 +852,7 @@ function executeAutomoveMove(bestMove) {
         try {
           const out = fn.apply(target, args);
           automoveLog('internal api attempt', method, args, out);
+          if (out === false) continue;
           return true;
         } catch {}
       }
@@ -840,7 +909,7 @@ async function performAutomove() {
   const playerSide = getPlayerSide(boardEl);
   const turn = detectSideToMove();
   const bestMove = getAutomoveCandidateMove();
-  if (playerSide !== turn || !bestMove || !lastEvalFen) {
+  if (playerSide !== turn || !bestMove || !lastEvalFen || !isMovePlayableNow(bestMove, lastEvalFen)) {
     automoveLog('cancel: preconditions', {
       playerSide,
       turn,
@@ -850,6 +919,12 @@ async function performAutomove() {
       activeClock: !!getActiveClockElement()
     });
     clearAutomoveSchedule();
+    return;
+  }
+  if (isAutomoveBlockedFor(lastEvalFen, bestMove)) {
+    automoveLog('cancel: move temporarily blocked after recent failed retries', { move: bestMove });
+    clearAutomoveSchedule(false);
+    updateAutomoveButtonState();
     return;
   }
 
@@ -889,6 +964,7 @@ async function performAutomove() {
     const side = getPlayerSide(currentBoard);
     const nowTurn = detectSideToMove();
     const liveFen = getFenFromPage();
+    const liveBoardFen = fenFromPieces();
     if (side !== nowTurn) {
       automoveLog('cancel: not my turn at fire time', { side, nowTurn });
       clearAutomoveSchedule();
@@ -899,8 +975,23 @@ async function performAutomove() {
       clearAutomoveSchedule();
       return;
     }
+    if (liveBoardFen && !isSameFenBoardAndTurn(liveBoardFen, automoveTargetFen)) {
+      automoveLog('cancel: live board snapshot differs from target', { liveBoardFen, target: automoveTargetFen });
+      clearAutomoveSchedule();
+      return;
+    }
+    if (!isMovePlayableNow(automovePlannedMove, automoveTargetFen)) {
+      automoveLog('cancel: move no longer playable on current board snapshot', { move: automovePlannedMove });
+      clearAutomoveSchedule();
+      return;
+    }
     const sent = executeAutomoveMove(automovePlannedMove);
     automoveLog('move dispatched', { move: automovePlannedMove, sent });
+    if (!sent) {
+      blockAutomoveFor(automoveTargetFen, automovePlannedMove);
+      clearAutomoveSchedule();
+      return;
+    }
 
     // Verify if turn changed; if not, try one more time quickly.
     sleep(220).then(() => {
@@ -911,17 +1002,38 @@ async function performAutomove() {
       }
       if (turnAfter !== side) {
         automoveLog('success: turn changed after move', { before: side, after: turnAfter });
+        clearAutomoveBlock();
         clearAutomoveSchedule();
         return;
       }
       automoveLog('retry: turn unchanged after first dispatch');
-      executeAutomoveMove(automovePlannedMove);
+      const retrySent = executeAutomoveMove(automovePlannedMove);
+      if (!retrySent) {
+        automoveLog('retry failed: dispatch not sent');
+      }
+      blockAutomoveFor(automoveTargetFen, automovePlannedMove);
       clearAutomoveSchedule();
     });
   }, automoveDelayMs);
 }
 
+let _detectSideToMoveInProgress = false;
+
 function detectSideToMove() {
+  // Recursion guard — if we're already inside this function on the call stack,
+  // return null rather than blowing the stack. This prevents cycles where
+  // detectTurnFromActiveClock → _detectOrientationColor (or other helpers)
+  // end up back here indirectly.
+  if (_detectSideToMoveInProgress) return null;
+  _detectSideToMoveInProgress = true;
+  try {
+    return _detectSideToMoveImpl();
+  } finally {
+    _detectSideToMoveInProgress = false;
+  }
+}
+
+function _detectSideToMoveImpl() {
   // ── Priority 0: active clock (most reliable for live games) ──────────────
   const clockTurn = detectTurnFromActiveClock();
   if (clockTurn) return clockTurn;
@@ -1391,24 +1503,42 @@ function _detectOrientationColor(boardEl) {
     document.querySelector('.flipped-board, [class*="board-flipped"]')
   ) return 'b';
 
-  // ── 7. Username position: if the logged-in user is at the TOP, they're playing black ──
-  const me = getLoggedInUsername();
-  if (me) {
-    for (const [panelCls, color] of [['top', 'b'], ['bottom', 'w']]) {
-      const panel = document.querySelector(
-        `[class*="player-${panelCls}"], [class*="board-player-${panelCls}"]`
-      );
-      if (!panel) continue;
-      const found = Array.from(
-        panel.querySelectorAll('[data-username], .user-username-component, .player-tagline-username')
-      ).some(el =>
-        (el.dataset?.username || el.textContent?.trim().split(/\s/)[0] || '').toLowerCase() === me
-      );
-      if (found) return color;
+  // ── 7. White king visual position — most reliable visual indicator ──────────
+  // On chess.com the local player's pieces are always at the bottom (the board
+  // flips when playing black). So:
+  //   white king in BOTTOM half of board → white is at bottom → player is WHITE
+  //   white king in TOP half of board    → white is at top   → player is BLACK (flipped board)
+  // This works regardless of whether orientation/flipped attributes are set.
+  try {
+    let boardRect;
+    try { boardRect = boardEl.getBoundingClientRect(); } catch {}
+    if (boardRect && boardRect.height > 80) {
+      const midY = boardRect.top + boardRect.height / 2;
+      const roots = [boardEl.shadowRoot, boardEl].filter(Boolean);
+      outer: for (const root of roots) {
+        let els;
+        try { els = root.querySelectorAll('[class*="square-"]'); } catch { continue; }
+        for (const el of els) {
+          const cls = typeof el.className === 'string' ? el.className : String(el.className || '');
+          // Match white king: class list must contain 'wk' as a whole word
+          if (!/(?:^|\s)wk(?:\s|$)/.test(cls)) continue;
+          let er;
+          try { er = el.getBoundingClientRect(); } catch { continue; }
+          if (!er || er.width === 0 || er.height === 0) continue;
+          const cy = er.top + er.height / 2;
+          // White king below midpoint → white at bottom → playing white
+          // White king above midpoint → white at top → playing black (flipped)
+          const detected = cy > midY ? 'w' : 'b';
+          playerSideCache = { side: detected, ts: now() };
+          return detected;
+        }
+      }
     }
-  }
+  } catch {}
 
-  // ── 8. Board coordinate labels (works when attributes/classes are missing) ──
+  // ── 8. Board coordinate labels ───────────────────────────────────────────
+  // Search both regular DOM and the board's shadow root (chess.com renders
+  // rank/file labels inside the web component's shadow root).
   const coordColor = detectOrientationFromBoardCoordinates(boardEl);
   if (coordColor) return coordColor;
 
@@ -1963,6 +2093,10 @@ new MutationObserver(() => {
     lastUrl = location.href;
     playerSideCache = { side: null, ts: 0 };
     lastLoggedPlayerSide = null;
+    lastEvalFen = null;
+    currentBestMove = null;
+    lastEvalTopMoves = [];
+    lastEvalMoveSourceFen = null;
     setTimeout(scanAndInject, 1000);
   }
 }).observe(document, { subtree: true, childList: true });
