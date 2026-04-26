@@ -253,12 +253,51 @@ let lastEvalTopMoves = [];
 let bestMoveOverlay = null;
 let evalToggleBtn = null;
 let toolsModal = null;
+let guiRefreshInterval = null;
 let arrowsEnabled = true; // Toggle per le frecce
+let isEvalBarEnabled = false;
 let automoveMode = 'blatant'; // 'blatant' | 'legit'
-const STOCKFISH_ONLINE_DEPTH = 15;
+let automoveDelayMin = 1;  // seconds (user configurable)
+let automoveDelayMax = 5;  // seconds (user configurable)
+let suggestMoveDepth = 15; // depth for SuggestMove/Arrows (user configurable)
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
 const EVAL_CACHE_TTL = 12 * 1000;
+const CSE_STATE_KEY = 'cse_mod_state_v1';
+
+function cseReadState() {
+  try {
+    const raw = localStorage.getItem(CSE_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function cseSaveState() {
+  const evalRect = evalBarPanel?.isConnected ? evalBarPanel.getBoundingClientRect() : null;
+  const state = {
+    favorites: { ...(cseGuiState?.favorites || {}) },
+    activeTab: cseGuiState?.activeTab || 'ALL',
+    modules: {
+      AutoMove: !!isAutomoveEnabled,
+      SuggestMove: !!arrowsEnabled,
+      EvaluationBar: !!isEvalBarEnabled,
+    },
+    settings: {
+      automoveMode,
+      automoveDelayMin,
+      automoveDelayMax,
+      suggestMoveDepth,
+    },
+    evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
+  };
+  try {
+    localStorage.setItem(CSE_STATE_KEY, JSON.stringify(state));
+  } catch {}
+}
 
 // ── FEN extraction ────────────────────────────────────────────
 
@@ -770,11 +809,7 @@ function getAutomoveCandidateMove() {
 }
 
 function updateAutomoveModeUI() {
-  const legitBtn = document.getElementById('cse-automove-mode-legit');
-  const blatantBtn = document.getElementById('cse-automove-mode-blatant');
-  if (!legitBtn || !blatantBtn) return;
-  legitBtn.classList.toggle('cse-mode-active', automoveMode === 'legit');
-  blatantBtn.classList.toggle('cse-mode-active', automoveMode === 'blatant');
+  if (toolsModal?.isConnected) cseRenderGui();
 }
 
 function clearAutomoveSchedule(clearTimer = true) {
@@ -793,23 +828,14 @@ function clearAutomoveSchedule(clearTimer = true) {
 }
 
 function updateAutomoveButtonState() {
-  const btn = document.getElementById('cse-automove-toggle-btn');
   const timerEl = document.getElementById('cse-automove-timer');
-  if (!btn) return;
-
-  btn.classList.toggle('cse-automove-active', isAutomoveEnabled);
-  if (!isAutomoveEnabled) {
-    if (timerEl) timerEl.textContent = '';
-    return;
+  if (timerEl) {
+    if (!isAutomoveEnabled) { timerEl.textContent = ''; return; }
+    if (!automoveScheduledAt || automoveDelayMs <= 0) { timerEl.textContent = ''; return; }
+    const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
+    timerEl.textContent = `(${(remainingMs / 1000).toFixed(1)}s)`;
   }
-
-  if (!automoveScheduledAt || automoveDelayMs <= 0) {
-    if (timerEl) timerEl.textContent = '';
-    return;
-  }
-
-  const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
-  if (timerEl) timerEl.textContent = `(${(remainingMs / 1000).toFixed(1)}s)`;
+  if (toolsModal?.isConnected) cseRenderGui();
 }
 
 function startAutomoveUiTicker() {
@@ -941,7 +967,7 @@ async function performAutomove() {
   clearAutomoveSchedule(false);
   automovePlannedMove = bestMove;
   automoveTargetFen = lastEvalFen;
-  automoveDelayMs = 1000 + Math.floor(Math.random() * 4001);
+  automoveDelayMs = (automoveDelayMin * 1000) + Math.floor(Math.random() * ((automoveDelayMax - automoveDelayMin) * 1000 + 1));
   automoveScheduledAt = now();
   automoveLog('scheduled', {
     move: automovePlannedMove,
@@ -1365,7 +1391,7 @@ async function fetchEval(fen) {
 
   // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
-    const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${STOCKFISH_ONLINE_DEPTH}`;
+    const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${suggestMoveDepth}`;
     const res = await fetch(url, { signal });
     if (res.ok) {
       const data = await res.json();
@@ -1781,178 +1807,541 @@ function cpToWhitePct(cp) {
 }
 
 function updateEvalBarDisplay(result) {
-  const bar = evalBarPanel;
-  if (!bar) return;
-
-  const blackSeg = bar.querySelector('[data-cse-part="black"]');
-  const whiteSeg = bar.querySelector('[data-cse-part="white"]');
-  const scoreEl  = bar.querySelector('[data-cse-part="score"]');
-
   if (!result) {
-    // Could not get eval — show neutral + error indicator
-    blackSeg.style.height = '50%';
-    whiteSeg.style.height = '50%';
-    scoreEl.textContent = '?';
-    scoreEl.className = 'cse-eval-score';
-    bar.title = 'Eval non disponibile (posizione non trovata o API non raggiungibile)';
     currentBestMove = null;
     lastEvalTopMoves = [];
     lastEvalMoveSourceFen = null;
     clearBestMoveOverlay();
+
+    if (evalBarPanel?.isConnected) {
+      const blackSeg = evalBarPanel.querySelector('[data-cse-part="black"]');
+      const whiteSeg = evalBarPanel.querySelector('[data-cse-part="white"]');
+      const scoreEl = evalBarPanel.querySelector('[data-cse-part="score"]');
+      if (blackSeg && whiteSeg && scoreEl) {
+        blackSeg.style.height = '50%';
+        whiteSeg.style.height = '50%';
+        scoreEl.textContent = '?';
+        scoreEl.className = 'cse-eval-score';
+      }
+      evalBarPanel.title = 'Eval non disponibile (posizione non trovata o API non raggiungibile)';
+    }
     return;
   }
 
   lastEvalMoveSourceFen = lastEvalFen;
   lastEvalTopMoves = Array.isArray(result.topMoves) ? result.topMoves.slice(0, 3) : [];
   setBestMove(result.bestMove);
-  bar.title = result.bestMove ? `Best move: ${result.bestMove}` : '';
-  let whitePct, label, cls;
+
+  let whitePct;
+  let label;
+  let cls;
 
   if (result.mate !== null && result.mate !== undefined) {
     const m = result.mate;
     whitePct = m > 0 ? 97 : 3;
-    label = (m > 0 ? '+' : '−') + 'M' + Math.abs(m);
-    cls   = m > 0 ? 'cse-eval-white-adv' : 'cse-eval-black-adv';
+    label = (m > 0 ? '+' : '-') + 'M' + Math.abs(m);
+    cls = m > 0 ? 'cse-eval-white-adv' : 'cse-eval-black-adv';
   } else {
     const cp = result.cp; // raw centipawns
     whitePct = cpToWhitePct(cp);
     const pawns = cp / 100;
-    label = (pawns >= 0 ? '+' : '−') + Math.abs(pawns).toFixed(1);
-    cls   = cp >  25 ? 'cse-eval-white-adv'
-          : cp < -25 ? 'cse-eval-black-adv'
-          : '';
+    label = (pawns >= 0 ? '+' : '-') + Math.abs(pawns).toFixed(1);
+    cls = cp > 25 ? 'cse-eval-white-adv'
+      : cp < -25 ? 'cse-eval-black-adv'
+      : '';
   }
 
-  const blackPct = 100 - whitePct;
-  blackSeg.style.height = blackPct + '%';
-  whiteSeg.style.height = whitePct + '%';
-  scoreEl.textContent = label;
-  scoreEl.className = 'cse-eval-score ' + cls;
+  if (evalBarPanel?.isConnected) {
+    const blackSeg = evalBarPanel.querySelector('[data-cse-part="black"]');
+    const whiteSeg = evalBarPanel.querySelector('[data-cse-part="white"]');
+    const scoreEl = evalBarPanel.querySelector('[data-cse-part="score"]');
+    if (blackSeg && whiteSeg && scoreEl) {
+      const blackPct = 100 - whitePct;
+      blackSeg.style.height = blackPct + '%';
+      whiteSeg.style.height = whitePct + '%';
+      scoreEl.textContent = label;
+      scoreEl.className = 'cse-eval-score ' + cls;
+    }
+    evalBarPanel.title = result.bestMove ? `Best move: ${result.bestMove}` : '';
+  }
+}
+const cseGuiState = {
+  activeTab: 'ALL',
+  favorites: { AutoMove: false, SuggestMove: false, EvaluationBar: false },
+  openSettings: null,
+};
+
+function applySavedGuiAndModuleState() {
+  const saved = cseReadState();
+  if (!saved) return;
+
+  if (saved.favorites && typeof saved.favorites === 'object') {
+    cseGuiState.favorites = {
+      ...cseGuiState.favorites,
+      AutoMove: !!saved.favorites.AutoMove,
+      SuggestMove: !!saved.favorites.SuggestMove,
+      EvaluationBar: !!saved.favorites.EvaluationBar,
+    };
+  }
+
+  if (saved.activeTab === 'ALL' || saved.activeTab === 'FAVORITE') {
+    cseGuiState.activeTab = saved.activeTab;
+  }
+
+  if (saved.modules && typeof saved.modules === 'object') {
+    isAutomoveEnabled = !!saved.modules.AutoMove;
+    arrowsEnabled = !!saved.modules.SuggestMove;
+    isEvalBarEnabled = !!saved.modules.EvaluationBar;
+  }
+
+  if (saved.settings && typeof saved.settings === 'object') {
+    if (saved.settings.automoveMode === 'legit' || saved.settings.automoveMode === 'blatant') automoveMode = saved.settings.automoveMode;
+    if (Number.isFinite(saved.settings.automoveDelayMin)) automoveDelayMin = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMin)));
+    if (Number.isFinite(saved.settings.automoveDelayMax)) automoveDelayMax = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMax)));
+    if (automoveDelayMax < automoveDelayMin) automoveDelayMax = automoveDelayMin;
+    if (Number.isFinite(saved.settings.suggestMoveDepth)) suggestMoveDepth = Math.max(1, Math.min(15, Math.round(saved.settings.suggestMoveDepth)));
+  }
 }
 
-function createEvalBar() {
-  if (toolsModal?.isConnected && evalBarPanel) return evalBarPanel;
-
-  const modal = document.createElement('div');
-  modal.className = 'cse-tools-modal';
-  modal.innerHTML = `
-    <div class="cse-tools-modal-header" id="cse-tools-drag">
-      <span class="cse-tools-modal-title">Chess Tools</span>
-      <button class="cse-tools-modal-close" id="cse-tools-close" title="Chiudi">X</button>
-    </div>
-    <div class="cse-tools-modal-body">
-      <div class="cse-eval-bar-root cse-eval-bar-in-modal">
-        <div class="cse-eval-inner">
-          <div class="cse-eval-black" data-cse-part="black" style="height:50%"></div>
-          <div class="cse-eval-white" data-cse-part="white" style="height:50%"></div>
-        </div>
-        <div class="cse-eval-score" data-cse-part="score">...</div>
-        <div class="cse-eval-label">Eval</div>
-      </div>
-      <div class="cse-tools-actions">
-        <button class="cse-modal-action-btn ${arrowsEnabled ? 'cse-arrows-active' : ''}" id="cse-arrows-toggle-btn" title="Mostra/nascondi frecce">
-          -> Arrows
-        </button>
-        <button class="cse-modal-action-btn" id="cse-automove-toggle-btn" title="Attiva/disattiva Automove">
-          AutoMove <span id="cse-automove-timer"></span>
-        </button>
-        <div class="cse-automove-mode-wrap">
-          <button class="cse-mode-btn" id="cse-automove-mode-blatant" title="Gioca sempre la miglior mossa">Blatant</button>
-          <button class="cse-mode-btn" id="cse-automove-mode-legit" title="Alterna random tra top 3">Legit</button>
-        </div>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  modal.querySelector('#cse-tools-close').addEventListener('click', removeEvalBar);
-
-  const arrowsBtn = modal.querySelector('#cse-arrows-toggle-btn');
-  arrowsBtn.addEventListener('click', () => {
-    arrowsEnabled = !arrowsEnabled;
-    arrowsBtn.classList.toggle('cse-arrows-active', arrowsEnabled);
-    if (!arrowsEnabled) hideBestMoveOverlay();
-    else syncBestMoveOverlay();
-  });
-
-  const automoveBtn = modal.querySelector('#cse-automove-toggle-btn');
-  automoveBtn.addEventListener('click', () => {
-    isAutomoveEnabled = !isAutomoveEnabled;
-    if (!isAutomoveEnabled) {
-      clearAutomoveSchedule();
-      stopAutomoveUiTicker();
-    } else {
-      startAutomoveUiTicker();
-      performAutomove();
-    }
-    updateAutomoveButtonState();
-  });
-
-  const modeBlatantBtn = modal.querySelector('#cse-automove-mode-blatant');
-  const modeLegitBtn = modal.querySelector('#cse-automove-mode-legit');
-  modeBlatantBtn.addEventListener('click', () => {
-    automoveMode = 'blatant';
-    updateAutomoveModeUI();
-  });
-  modeLegitBtn.addEventListener('click', () => {
-    automoveMode = 'legit';
-    updateAutomoveModeUI();
-  });
-
-  const handle = modal.querySelector('#cse-tools-drag');
-  let startX, startY, startLeft, startTop;
-
-  handle.addEventListener('mousedown', e => {
-    e.preventDefault();
-    if (e.target.closest('#cse-tools-close')) return;
-    const rect = modal.getBoundingClientRect();
-    startX = e.clientX; startY = e.clientY;
-    startLeft = rect.left; startTop = rect.top;
-
-    modal.style.right = 'auto';
-    modal.style.left = rect.left + 'px';
-    modal.style.top  = rect.top  + 'px';
-
-    function onMove(e) {
-      modal.style.left = (startLeft + e.clientX - startX) + 'px';
-      modal.style.top  = (startTop  + e.clientY - startY) + 'px';
-    }
-    function onUp() {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup',   onUp);
-    }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup',   onUp);
-  });
-
-  toolsModal = modal;
-  evalBarPanel = modal.querySelector('.cse-eval-bar-root');
-  updateAutomoveButtonState();
-  updateAutomoveModeUI();
-  if (isAutomoveEnabled) startAutomoveUiTicker();
-  return evalBarPanel;
+function getSavedEvalBarPosition() {
+  const saved = cseReadState();
+  const p = saved?.evalBarPosition;
+  if (!p || !Number.isFinite(p.left) || !Number.isFinite(p.top)) return null;
+  return { left: Math.round(p.left), top: Math.round(p.top) };
 }
 
-function removeEvalBar() {
-  if (evalUpdateInterval) { clearInterval(evalUpdateInterval); evalUpdateInterval = null; }
+function clampToViewport(el, left, top) {
+  const maxLeft = Math.max(0, window.innerWidth - el.offsetWidth);
+  const maxTop = Math.max(0, window.innerHeight - el.offsetHeight);
+  return {
+    left: Math.min(Math.max(0, left), maxLeft),
+    top: Math.min(Math.max(0, top), maxTop),
+  };
+}
+
+function isEvaluationEngineNeeded() {
+  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled);
+}
+
+function stopEvalEngine() {
+  if (evalUpdateInterval) {
+    clearInterval(evalUpdateInterval);
+    evalUpdateInterval = null;
+  }
   evalRequestSeq++;
-  stopAutomoveUiTicker();
   clearAutomoveSchedule();
-  if (toolsModal) { toolsModal.remove(); toolsModal = null; }
-  evalBarPanel = null;
-  clearBestMoveOverlay();
   lastEvalFen = null;
   lastEvalMoveSourceFen = null;
   currentBestMove = null;
   lastEvalTopMoves = [];
-  if (evalToggleBtn) evalToggleBtn.classList.remove('cse-eval-active');
+  hideBestMoveOverlay();
 }
 
-let evalPending = false;
+function ensureEvalEngineState(forceTick = false) {
+  const needed = isEvaluationEngineNeeded();
+  if (!needed) {
+    stopEvalEngine();
+    return;
+  }
+  if (!evalUpdateInterval) {
+    tickEvalBar();
+    evalUpdateInterval = setInterval(tickEvalBar, 1000);
+    return;
+  }
+  if (forceTick) tickEvalBar();
+}
+
+function cseRenderGui() {
+  const modal = document.getElementById('cse-mc-gui');
+  if (!modal) return;
+  const tab = cseGuiState.activeTab;
+
+  const mods = [
+    { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled },
+    { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled },
+    { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled },
+  ].filter(m => tab === 'ALL' || (tab === 'FAVORITE' && cseGuiState.favorites[m.id]));
+
+  modal.querySelectorAll('.cse-mc-tab').forEach(t => {
+    const active = t.dataset.tab === tab;
+    t.style.color = active ? '#fff' : '#666';
+    t.style.borderBottom = active ? '2px solid #4a9e5c' : '2px solid transparent';
+    t.style.fontWeight = active ? '600' : '400';
+  });
+
+  const grid = modal.querySelector('#cse-mc-grid');
+  grid.innerHTML = '';
+
+  if (mods.length === 0) {
+    grid.innerHTML = '<div style="grid-column:1/-1;padding:30px;text-align:center;color:#666;font-size:12px;">No modules in this category</div>';
+    return;
+  }
+
+  mods.forEach(mod => {
+    const isFav = cseGuiState.favorites[mod.id];
+    const card = document.createElement('div');
+    card.className = 'cse-mc-card';
+
+    const iconMap = {
+      AutoMove: { letter: 'A', color: '#4a9e5c' },
+      SuggestMove: { letter: 'S', color: '#5b8fc9' },
+      EvaluationBar: { letter: 'E', color: '#b58a4a' },
+    };
+    const icon = iconMap[mod.id] || { letter: '?', color: '#888' };
+
+    card.innerHTML = `
+      <div class="cse-mc-card-top">
+        <div class="cse-mc-icon" style="color:${icon.color};">${icon.letter}</div>
+        <div class="cse-mc-card-controls">
+          <div class="cse-mc-toggle ${mod.active ? 'cse-mc-on' : ''}" data-id="${mod.id}">
+            <div class="cse-mc-knob"></div>
+          </div>
+          <div class="cse-mc-dots" data-id="${mod.id}" title="Settings">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+      </div>
+      <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' && isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-badge"></span>' : ''}</div>
+      <div class="cse-mc-fav ${isFav ? 'cse-mc-fav-on' : ''}" data-id="${mod.id}" title="${isFav ? 'Remove from favorites' : 'Add to favorites'}">&#9733;</div>
+    `;
+
+    card.querySelector('.cse-mc-toggle').addEventListener('click', () => {
+      if (mod.id === 'AutoMove') {
+        isAutomoveEnabled = !isAutomoveEnabled;
+        if (!isAutomoveEnabled) {
+          clearAutomoveSchedule();
+          stopAutomoveUiTicker();
+        } else {
+          startAutomoveUiTicker();
+        }
+      } else if (mod.id === 'SuggestMove') {
+        arrowsEnabled = !arrowsEnabled;
+        if (!arrowsEnabled) hideBestMoveOverlay();
+      } else if (mod.id === 'EvaluationBar') {
+        isEvalBarEnabled = !isEvalBarEnabled;
+        if (isEvalBarEnabled) createEvaluationBarPanel();
+        else removeEvaluationBarPanel();
+      }
+
+      ensureEvalEngineState(true);
+      if (isAutomoveEnabled) performAutomove();
+      updateAutomoveButtonState();
+      cseSaveState();
+      cseRenderGui();
+    });
+
+    card.querySelector('.cse-mc-dots').addEventListener('click', e => {
+      e.stopPropagation();
+      cseGuiState.openSettings = mod.id;
+      cseRenderSettingsPanel(mod.id);
+    });
+
+    card.querySelector('.cse-mc-fav').addEventListener('click', e => {
+      e.stopPropagation();
+      cseGuiState.favorites[mod.id] = !cseGuiState.favorites[mod.id];
+      cseSaveState();
+      cseRenderGui();
+    });
+
+    grid.appendChild(card);
+  });
+
+  if (isAutomoveEnabled && automoveScheduledAt && automoveDelayMs > 0) {
+    const badge = document.getElementById('cse-mc-timer-badge');
+    if (badge) {
+      const rem = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
+      badge.textContent = ' (' + (rem / 1000).toFixed(1) + 's)';
+    }
+  }
+
+  if (cseGuiState.openSettings && !mods.find(m => m.id === cseGuiState.openSettings)) {
+    cseGuiState.openSettings = null;
+    const ov = modal.querySelector('#cse-mc-settings-overlay');
+    if (ov) ov.style.display = 'none';
+  }
+}
+
+function cseRenderSettingsPanel(modId) {
+  const modal = document.getElementById('cse-mc-gui');
+  if (!modal) return;
+  const ov = modal.querySelector('#cse-mc-settings-overlay');
+  if (!ov) return;
+  ov.style.display = 'flex';
+
+  const isAuto = modId === 'AutoMove';
+  ov.innerHTML = `
+    <div class="cse-mc-spanel">
+      <div class="cse-mc-spanel-header">
+        <span>${modId} Settings</span>
+        <button class="cse-mc-spanel-close" id="cse-mc-sp-close">&#10005;</button>
+      </div>
+      ${isAuto ? `
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">Mode</span>
+          <div class="cse-mc-mode-btns">
+            <button class="cse-mc-mbtn ${automoveMode === 'legit' ? 'cse-mc-mbtn-on' : ''}" data-mode="legit">Legit</button>
+            <button class="cse-mc-mbtn ${automoveMode === 'blatant' ? 'cse-mc-mbtn-on' : ''}" data-mode="blatant">Blatant</button>
+          </div>
+        </div>
+        <div class="cse-mc-srow">
+          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay min</span><span class="cse-mc-sval" id="cse-sp-dmin-val">${automoveDelayMin}s</span></div>
+          <input type="range" class="cse-mc-slider" id="cse-sp-dmin" min="1" max="15" step="1" value="${automoveDelayMin}">
+        </div>
+        <div class="cse-mc-srow">
+          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay max</span><span class="cse-mc-sval" id="cse-sp-dmax-val">${automoveDelayMax}s</span></div>
+          <input type="range" class="cse-mc-slider" id="cse-sp-dmax" min="1" max="15" step="1" value="${automoveDelayMax}">
+        </div>
+      ` : `
+        <div class="cse-mc-srow">
+          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-depth-val">${suggestMoveDepth}</span></div>
+          <input type="range" class="cse-mc-slider" id="cse-sp-depth" min="1" max="15" step="1" value="${suggestMoveDepth}">
+        </div>
+      `}
+    </div>
+  `;
+
+  ov.querySelector('#cse-mc-sp-close').addEventListener('click', () => {
+    ov.style.display = 'none';
+    cseGuiState.openSettings = null;
+  });
+
+  if (isAuto) {
+    ov.querySelectorAll('.cse-mc-mbtn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        automoveMode = btn.dataset.mode;
+        ov.querySelectorAll('.cse-mc-mbtn').forEach(b => b.classList.toggle('cse-mc-mbtn-on', b.dataset.mode === automoveMode));
+        cseSaveState();
+        updateAutomoveModeUI();
+      });
+    });
+
+    const dminSl = ov.querySelector('#cse-sp-dmin');
+    const dmaxSl = ov.querySelector('#cse-sp-dmax');
+    dminSl.addEventListener('input', () => {
+      automoveDelayMin = parseInt(dminSl.value, 10);
+      if (automoveDelayMin > automoveDelayMax) {
+        automoveDelayMax = automoveDelayMin;
+        dmaxSl.value = automoveDelayMax;
+        ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
+      }
+      ov.querySelector('#cse-sp-dmin-val').textContent = automoveDelayMin + 's';
+      cseSaveState();
+    });
+    dmaxSl.addEventListener('input', () => {
+      automoveDelayMax = parseInt(dmaxSl.value, 10);
+      if (automoveDelayMax < automoveDelayMin) {
+        automoveDelayMin = automoveDelayMax;
+        dminSl.value = automoveDelayMin;
+        ov.querySelector('#cse-sp-dmin-val').textContent = automoveDelayMin + 's';
+      }
+      ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
+      cseSaveState();
+    });
+  } else {
+    const depSl = ov.querySelector('#cse-sp-depth');
+    depSl.addEventListener('input', () => {
+      suggestMoveDepth = parseInt(depSl.value, 10);
+      ov.querySelector('#cse-sp-depth-val').textContent = suggestMoveDepth;
+      evalCache.clear();
+      lastEvalFen = null;
+      cseSaveState();
+      ensureEvalEngineState(true);
+    });
+  }
+}
+
+function createEvaluationBarPanel() {
+  if (evalBarPanel?.isConnected) return evalBarPanel;
+
+  const bar = document.createElement('div');
+  bar.className = 'cse-eval-bar-root';
+  bar.innerHTML = `
+    <div class="cse-eval-drag" data-cse-part="drag" title="Drag"></div>
+    <div class="cse-eval-inner">
+      <div class="cse-eval-black" data-cse-part="black" style="height:50%"></div>
+      <div class="cse-eval-white" data-cse-part="white" style="height:50%"></div>
+    </div>
+    <div class="cse-eval-score" data-cse-part="score">...</div>
+    <div class="cse-eval-label">Eval</div>
+  `;
+  document.body.appendChild(bar);
+
+  const savedPos = getSavedEvalBarPosition();
+  const desired = savedPos || { left: Math.max(12, window.innerWidth - 70), top: 120 };
+  const initial = clampToViewport(bar, desired.left, desired.top);
+  bar.style.left = initial.left + 'px';
+  bar.style.top = initial.top + 'px';
+
+  const handle = bar.querySelector('[data-cse-part="drag"]');
+  let dragPointerId = null;
+  let dX = 0;
+  let dY = 0;
+  let dL = 0;
+  let dT = 0;
+
+  const onPointerMove = e => {
+    if (e.pointerId !== dragPointerId) return;
+    const next = clampToViewport(bar, dL + e.clientX - dX, dT + e.clientY - dY);
+    bar.style.left = next.left + 'px';
+    bar.style.top = next.top + 'px';
+  };
+
+  const stopDrag = () => {
+    if (dragPointerId !== null && handle.hasPointerCapture(dragPointerId)) handle.releasePointerCapture(dragPointerId);
+    dragPointerId = null;
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', stopDrag);
+    window.removeEventListener('pointercancel', stopDrag);
+    cseSaveState();
+  };
+
+  handle.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const r = bar.getBoundingClientRect();
+    dX = e.clientX;
+    dY = e.clientY;
+    dL = r.left;
+    dT = r.top;
+    dragPointerId = e.pointerId;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grabbing';
+    handle.setPointerCapture(e.pointerId);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopDrag);
+    window.addEventListener('pointercancel', stopDrag);
+  });
+
+  evalBarPanel = bar;
+  return bar;
+}
+
+function removeEvaluationBarPanel() {
+  if (evalBarPanel?.isConnected) {
+    cseSaveState();
+    evalBarPanel.remove();
+  }
+  evalBarPanel = null;
+}
+
+function createToolsGui() {
+  if (toolsModal?.isConnected) return toolsModal;
+
+  const modal = document.createElement('div');
+  modal.id = 'cse-mc-gui';
+  modal.className = 'cse-mc-gui';
+  modal.innerHTML = `
+    <div class="cse-mc-titlebar" id="cse-mc-drag">
+      <div style="flex:1"></div>
+      <button class="cse-mc-close-btn" id="cse-mc-close">&#10005;</button>
+    </div>
+    <div class="cse-mc-tabs">
+      <button class="cse-mc-tab" data-tab="ALL" style="color:#fff;border-bottom:2px solid #4a9e5c;font-weight:600;">ALL</button>
+      <button class="cse-mc-tab" data-tab="FAVORITE" style="color:#666;border-bottom:2px solid transparent;">FAVORITE</button>
+      <div style="flex:1"></div>
+    </div>
+    <div class="cse-mc-grid" id="cse-mc-grid"></div>
+    <div id="cse-mc-settings-overlay" class="cse-mc-settings-overlay" style="display:none;"></div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#cse-mc-close').addEventListener('click', closeToolsGui);
+
+  modal.querySelectorAll('.cse-mc-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      cseGuiState.activeTab = tab.dataset.tab;
+      cseSaveState();
+      cseRenderGui();
+    });
+  });
+
+  const handle = modal.querySelector('#cse-mc-drag');
+  let dragPointerId = null;
+  let dX = 0;
+  let dY = 0;
+  let dL = 0;
+  let dT = 0;
+
+  const onPointerMove = e => {
+    if (e.pointerId !== dragPointerId) return;
+    const next = clampToViewport(modal, dL + e.clientX - dX, dT + e.clientY - dY);
+    modal.style.left = next.left + 'px';
+    modal.style.top = next.top + 'px';
+    modal.style.right = 'auto';
+    modal.style.transform = 'none';
+  };
+
+  const stopDrag = () => {
+    if (dragPointerId !== null && handle.hasPointerCapture(dragPointerId)) handle.releasePointerCapture(dragPointerId);
+    dragPointerId = null;
+    handle.style.cursor = 'grab';
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', stopDrag);
+    window.removeEventListener('pointercancel', stopDrag);
+  };
+
+  handle.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('#cse-mc-close')) return;
+    e.preventDefault();
+
+    const r = modal.getBoundingClientRect();
+    dX = e.clientX;
+    dY = e.clientY;
+    dL = r.left;
+    dT = r.top;
+    dragPointerId = e.pointerId;
+
+    modal.style.right = 'auto';
+    modal.style.transform = 'none';
+    modal.style.left = dL + 'px';
+    modal.style.top = dT + 'px';
+
+    handle.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grabbing';
+
+    handle.setPointerCapture(e.pointerId);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopDrag);
+    window.addEventListener('pointercancel', stopDrag);
+  });
+
+  toolsModal = modal;
+  cseRenderGui();
+
+  if (guiRefreshInterval) clearInterval(guiRefreshInterval);
+  guiRefreshInterval = setInterval(() => {
+    if (!toolsModal?.isConnected) return;
+    const badge = document.getElementById('cse-mc-timer-badge');
+    if (!badge || !isAutomoveEnabled || !automoveScheduledAt || automoveDelayMs <= 0) {
+      if (badge) badge.textContent = '';
+      return;
+    }
+    const rem = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
+    badge.textContent = ' (' + (rem / 1000).toFixed(1) + 's)';
+  }, 100);
+
+  return modal;
+}
+
+function closeToolsGui() {
+  if (toolsModal) {
+    toolsModal.remove();
+    toolsModal = null;
+  }
+  if (guiRefreshInterval) {
+    clearInterval(guiRefreshInterval);
+    guiRefreshInterval = null;
+  }
+}
 
 async function tickEvalBar() {
-  const bar = evalBarPanel;
-  if (!bar) return;
+  if (!isEvaluationEngineNeeded()) return;
   logDetectedPlayerColor(getBoardElement());
 
   const fen = getFenFromPage();
@@ -1963,48 +2352,50 @@ async function tickEvalBar() {
     lastEvalMoveSourceFen = null;
     currentBestMove = null;
     lastEvalTopMoves = [];
-    bar.querySelector('[data-cse-part="score"]').textContent = '?';
-    bar.title = 'Posizione non trovata sulla board';
+    if (evalBarPanel?.isConnected) {
+      const scoreEl = evalBarPanel.querySelector('[data-cse-part="score"]');
+      if (scoreEl) scoreEl.textContent = '?';
+      evalBarPanel.title = 'Posizione non trovata sulla board';
+    }
     hideBestMoveOverlay();
     clearAutomoveSchedule();
     return;
   }
 
   if (fen === lastEvalFen) {
-    // Position unchanged — just keep overlay in sync (board may have scrolled/resized)
-    syncBestMoveOverlay();
-    performAutomove();
+    if (arrowsEnabled) syncBestMoveOverlay();
+    else hideBestMoveOverlay();
+    if (isAutomoveEnabled) performAutomove();
     return;
   }
+
   lastEvalFen = fen;
   const requestSeq = ++evalRequestSeq;
-  bar.title = '';
 
-  const scoreEl = bar.querySelector('[data-cse-part="score"]');
-  scoreEl.textContent = '…';
-  scoreEl.className = 'cse-eval-score cse-eval-thinking';
+  if (evalBarPanel?.isConnected) {
+    evalBarPanel.title = '';
+    const scoreEl = evalBarPanel.querySelector('[data-cse-part="score"]');
+    if (scoreEl) {
+      scoreEl.textContent = '...';
+      scoreEl.className = 'cse-eval-score cse-eval-thinking';
+    }
+  }
 
   const result = await fetchEval(fen);
   if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
 
   updateEvalBarDisplay(result);
-  performAutomove();
+  if (!arrowsEnabled) hideBestMoveOverlay();
+  if (isAutomoveEnabled) performAutomove();
 }
 
-function toggleEvalBar() {
-  const btn = evalToggleBtn;
-  if (evalBarPanel?.isConnected) {
-    removeEvalBar();
+function toggleToolsGui() {
+  if (toolsModal?.isConnected) {
+    closeToolsGui();
     return;
   }
-  createEvalBar();
-  if (btn) btn.classList.add('cse-eval-active');
-  tickEvalBar();
-  evalUpdateInterval = setInterval(tickEvalBar, 1000);
+  createToolsGui();
 }
-
-// ─── Eval Toggle Button ────────────────────────────────────────────────────────
-
 function injectEvalToggleButton() {
   if (evalToggleBtn?.isConnected) return;
 
@@ -2012,7 +2403,7 @@ function injectEvalToggleButton() {
   btn.className = 'cse-tools-open-btn';
   btn.title = 'Apri/chiudi Tools';
   btn.textContent = 'Tools';
-  btn.addEventListener('click', toggleEvalBar);
+  btn.addEventListener('click', toggleToolsGui);
   document.body.appendChild(btn);
   evalToggleBtn = btn;
 }
@@ -2081,8 +2472,19 @@ function scanAndInjectEval() {
 window.addEventListener('resize', syncBestMoveOverlay);
 window.addEventListener('scroll', syncBestMoveOverlay, true);
 
+document.addEventListener('keydown', e => {
+  if (e.key === 'Shift' && e.location === 2) {
+    toggleToolsGui();
+  }
+});
+
 const observer = new MutationObserver(() => { scanAndInject(); scanAndInjectEval(); syncBestMoveOverlay(); });
 observer.observe(document.body, { childList: true, subtree: true });
+applySavedGuiAndModuleState();
+if (isEvalBarEnabled) createEvaluationBarPanel();
+if (isAutomoveEnabled) startAutomoveUiTicker();
+ensureEvalEngineState(true);
+cseSaveState();
 scanAndInject();
 scanAndInjectEval();
 
@@ -2100,5 +2502,7 @@ new MutationObserver(() => {
     setTimeout(scanAndInject, 1000);
   }
 }).observe(document, { subtree: true, childList: true });
+
+
 
 
