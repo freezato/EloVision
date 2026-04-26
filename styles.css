@@ -735,6 +735,7 @@
 .cse-mc-spanel-close:hover { color: #ff6b6b; }
 
 .cse-mc-srow { margin-bottom: 14px; }
+.cse-mc-check-row { margin-bottom: 10px; }
 
 .cse-mc-slabel {
   font-size: 11px;
@@ -751,6 +752,22 @@
   font-size: 11px;
   color: #4a9e5c;
   font-weight: 700;
+}
+
+.cse-mc-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #a9a9a9;
+  user-select: none;
+}
+
+.cse-mc-check input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  accent-color: #4a9e5c;
+  cursor: pointer;
 }
 
 .cse-mc-slider {

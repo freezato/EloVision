@@ -261,6 +261,11 @@ let guiHudPanel = null;
 let automoveMode = 'blatant'; // 'blatant' | 'legit'
 let automoveDelayMin = 1;  // seconds (user configurable)
 let automoveDelayMax = 5;  // seconds (user configurable)
+let automoveFastWhenLowTime = false; // speed up when own clock < 30s
+let automoveFastInOpening = false;   // speed up during first 8 full moves
+let isPuzzleRushEnabled = false;
+let isAutoPlayEnabled = false;
+let puzzleRushDepth = 20;
 let suggestMoveDepth = 15; // depth for SuggestMove/Arrows (user configurable)
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
@@ -285,6 +290,8 @@ function cseSaveState() {
     activeTab: cseGuiState?.activeTab || 'ALL',
     modules: {
       AutoMove: !!isAutomoveEnabled,
+      PuzzleRush: !!isPuzzleRushEnabled,
+      AutoPlay: !!isAutoPlayEnabled,
       SuggestMove: !!arrowsEnabled,
       EvaluationBar: !!isEvalBarEnabled,
       GUI: !!isGuiHudEnabled,
@@ -293,6 +300,9 @@ function cseSaveState() {
       automoveMode,
       automoveDelayMin,
       automoveDelayMax,
+      automoveFastWhenLowTime,
+      automoveFastInOpening,
+      puzzleRushDepth,
       suggestMoveDepth,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
@@ -428,6 +438,21 @@ function getPlyCountFromMoveList() {
 function estimateFullmoveNumber() {
   const plyCount = getPlyCountFromMoveList();
   return Math.max(1, Math.floor((plyCount || 0) / 2) + 1);
+}
+
+function getReliableFullmoveNumber() {
+  const plyCount = getPlyCountFromMoveList();
+  if (Number.isInteger(plyCount) && plyCount >= 0) {
+    return Math.max(1, Math.floor(plyCount / 2) + 1);
+  }
+
+  // Fallback only if FEN fullmove field is present and valid.
+  if (typeof lastEvalFen === 'string') {
+    const parts = lastEvalFen.trim().split(/\s+/);
+    const fullmove = parseInt(parts[5], 10);
+    if (Number.isInteger(fullmove) && fullmove > 0) return fullmove;
+  }
+  return null;
 }
 
 function findTurnInObject(root, maxDepth = 2, maxNodes = 120) {
@@ -617,8 +642,14 @@ let automoveScheduledAt = 0;
 let automoveDelayMs = 0;
 let automovePlannedMove = null;
 let automoveTargetFen = null;
+let automoveScheduledProfile = null; // 'automove' | 'puzzleRush'
 let automoveBlockedKey = null;
 let automoveBlockedUntil = 0;
+let autoPlayTickInterval = null;
+let autoPlayTimeout = null;
+let autoPlayScheduledAt = 0;
+let autoPlayDelayMs = 0;
+let autoPlayHandledToken = null;
 const AUTOMOVE_DEBUG = true;
 let lastLoggedPlayerSide = null;
 let playerSideCache = { side: null, ts: 0 };
@@ -686,6 +717,158 @@ function sleep(ms) {
 function automoveLog(...args) {
   if (!AUTOMOVE_DEBUG) return;
   console.log('[ChessStats][AutoMove]', ...args);
+}
+
+function autoPlayLog(...args) {
+  if (!AUTOMOVE_DEBUG) return;
+  console.log('[ChessStats][AutoPlay]', ...args);
+}
+
+function clearAutoPlaySchedule(resetHandledToken = false) {
+  if (autoPlayTimeout) {
+    clearTimeout(autoPlayTimeout);
+    autoPlayTimeout = null;
+  }
+  autoPlayScheduledAt = 0;
+  autoPlayDelayMs = 0;
+  if (resetHandledToken) autoPlayHandledToken = null;
+}
+
+function isElementRenderable(el) {
+  if (!el || !el.isConnected) return false;
+  let style;
+  try { style = window.getComputedStyle(el); } catch { return false; }
+  if (!style) return false;
+  if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
+  let rect;
+  try { rect = el.getBoundingClientRect(); } catch { return false; }
+  return !!rect && rect.width > 2 && rect.height > 2;
+}
+
+function normalizeActionText(text) {
+  return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function scoreAutoPlayActionText(text) {
+  const t = normalizeActionText(text);
+  if (!t) return 0;
+  if (/\b(play again|rematch)\b/.test(t)) return 120;
+  if (/\b(new game|new match|start new)\b/.test(t)) return 110;
+  if (/\bnew\b/.test(t) && /\b(min|sec|second|rapid|blitz|bullet|daily)\b/.test(t)) return 90;
+  if (/\bplay\b/.test(t) && /\bnew\b/.test(t)) return 85;
+  return 0;
+}
+
+function getAutoPlayActionCandidates() {
+  if (!isOnlineGameContext()) return [];
+  const scopeSelectors = [
+    '[data-cy*="game-over"]',
+    '[class*="game-over"]',
+    '[class*="result"]',
+    '[class*="post-game"]',
+    '[class*="rematch"]',
+    '[role="dialog"]',
+    '[class*="modal"]'
+  ];
+  const buttonSelectors = [
+    'button',
+    'a[role="button"]',
+    'div[role="button"]'
+  ];
+  const scopes = Array.from(new Set([
+    ...scopeSelectors.flatMap(sel => Array.from(document.querySelectorAll(sel))),
+    document.body
+  ]));
+  const candidates = [];
+
+  for (const scope of scopes) {
+    for (const btnSel of buttonSelectors) {
+      const nodes = Array.from(scope.querySelectorAll(btnSel));
+      for (const node of nodes) {
+        if (!isElementRenderable(node)) continue;
+        if (node.matches?.('[disabled], [aria-disabled="true"]')) continue;
+        const text = normalizeActionText(
+          [node.textContent, node.getAttribute?.('aria-label'), node.getAttribute?.('title')].filter(Boolean).join(' ')
+        );
+        const score = scoreAutoPlayActionText(text);
+        if (!score) continue;
+        candidates.push({ node, text, score });
+      }
+    }
+  }
+
+  return candidates
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6);
+}
+
+function getAutoPlayAction() {
+  const candidate = getAutoPlayActionCandidates()[0];
+  if (!candidate) return null;
+  const token = `${location.pathname}|${candidate.text}`;
+  return { ...candidate, token };
+}
+
+function performAutoPlayTick() {
+  if (!isAutoPlayEnabled) {
+    clearAutoPlaySchedule(true);
+    updateAutomoveButtonState();
+    return;
+  }
+
+  const action = getAutoPlayAction();
+  if (!action) {
+    clearAutoPlaySchedule(true);
+    updateAutomoveButtonState();
+    return;
+  }
+
+  if (autoPlayHandledToken === action.token) return;
+  if (autoPlayTimeout) return;
+
+  autoPlayDelayMs = 2000 + Math.floor(Math.random() * 1001);
+  autoPlayScheduledAt = now();
+  autoPlayLog('scheduled', { delayMs: autoPlayDelayMs, text: action.text });
+  updateAutomoveButtonState();
+
+  autoPlayTimeout = setTimeout(() => {
+    autoPlayTimeout = null;
+    if (!isAutoPlayEnabled) {
+      clearAutoPlaySchedule(true);
+      return;
+    }
+    const live = getAutoPlayAction();
+    if (!live) {
+      clearAutoPlaySchedule(true);
+      return;
+    }
+    if (autoPlayHandledToken === live.token) return;
+    try {
+      live.node.click();
+      autoPlayHandledToken = live.token;
+      autoPlayLog('clicked', { text: live.text });
+    } catch (err) {
+      autoPlayLog('click failed', err);
+    } finally {
+      clearAutoPlaySchedule(false);
+      updateAutomoveButtonState();
+    }
+  }, autoPlayDelayMs);
+}
+
+function startAutoPlayTicker() {
+  if (autoPlayTickInterval) return;
+  performAutoPlayTick();
+  autoPlayTickInterval = setInterval(() => {
+    performAutoPlayTick();
+    updateAutomoveButtonState();
+  }, 500);
+}
+
+function stopAutoPlayTicker() {
+  if (!autoPlayTickInterval) return;
+  clearInterval(autoPlayTickInterval);
+  autoPlayTickInterval = null;
 }
 
 function logDetectedPlayerColor(boardEl = getBoardElement()) {
@@ -798,17 +981,110 @@ function inferPlayerSideFromPieceDistribution(boardEl = getBoardElement()) {
   return bottomB > bottomW ? 'b' : 'w';
 }
 
-function getAutomoveCandidateMove() {
+function isPuzzleContext() {
+  const path = String(location.pathname || '').toLowerCase();
+  if (/\/puzzles?(\/|$)/.test(path)) return true;
+  if (/\/puzzle-rush(\/|$)/.test(path)) return true;
+  if (document.querySelector('[data-cy*="puzzle"], [class*="puzzle-rush"], [class*="puzzle-board"]')) return true;
+  return false;
+}
+
+function isOnlineGameContext() {
+  if (isPuzzleContext()) return false;
+  const path = String(location.pathname || '').toLowerCase();
+  if (/\/play\/online(\/|$)/.test(path)) return true;
+  if (/\/game\/live(\/|$)/.test(path)) return true;
+  return !!(getBoardElement() && document.querySelector('.clock-component, .player-clock, [class*="clock-player-turn"]'));
+}
+
+function getActiveMoveAssistProfile() {
+  if (isPuzzleContext()) return isPuzzleRushEnabled ? 'puzzleRush' : null;
+  if (isOnlineGameContext()) return isAutomoveEnabled ? 'automove' : null;
+  return null;
+}
+
+function getAutomoveCandidateMove(profile = 'automove') {
   if (lastEvalMoveSourceFen !== lastEvalFen) return null;
   const fallbackRaw = extractUciMove(currentBestMove);
   const fallback = isMovePlayableNow(fallbackRaw, lastEvalFen) ? fallbackRaw : null;
+  if (profile === 'puzzleRush') return fallback;
   if (automoveMode !== 'legit') return fallback;
   const pool = Array.from(new Set((lastEvalTopMoves || [])
     .map(extractUciMove)
     .filter(m => isMovePlayableNow(m, lastEvalFen))
   )).slice(0, 3);
   if (!pool.length) return fallback;
-  return pool[Math.floor(Math.random() * pool.length)] || fallback;
+
+  // Humanized "legit":
+  // - Mostly best move
+  // - Sometimes small inaccuracy (2nd/3rd line)
+  // - Rare tiny blunder-like choice (worst available in top lines)
+  if (pool.length === 1) return pool[0] || fallback;
+  const roll = Math.random();
+  if (roll < 0.58) return pool[0] || fallback;
+  if (roll < 0.83) return pool[Math.min(1, pool.length - 1)] || fallback;
+  if (roll < 0.95) return pool[Math.min(2, pool.length - 1)] || fallback;
+  return pool[pool.length - 1] || fallback;
+}
+
+function parseClockTextToSeconds(text) {
+  if (typeof text !== 'string') return null;
+  const cleaned = text.replace(/\s+/g, '').replace(/,/g, '.');
+  const hms = cleaned.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (hms) {
+    const a = parseInt(hms[1], 10);
+    const b = parseInt(hms[2], 10);
+    const c = hms[3] ? parseInt(hms[3], 10) : null;
+    if (Number.isNaN(a) || Number.isNaN(b)) return null;
+    if (c !== null && !Number.isNaN(c)) return (a * 3600) + (b * 60) + c;
+    return (a * 60) + b;
+  }
+  const secMatch = cleaned.match(/(\d+(?:\.\d+)?)s/i);
+  if (secMatch) return parseFloat(secMatch[1]);
+  return null;
+}
+
+function getOwnClockSecondsRemaining(boardEl = getBoardElement(), playerSide = getPlayerSide(boardEl), turn = detectSideToMove()) {
+  if (!boardEl || !playerSide || !turn || playerSide !== turn) return null;
+  const activeClock = getActiveClockElement();
+  if (!activeClock) return null;
+  const txt = activeClock.textContent || '';
+  const sec = parseClockTextToSeconds(txt);
+  return Number.isFinite(sec) ? sec : null;
+}
+
+function computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, profile = 'automove') {
+  let minSec = automoveDelayMin;
+  let maxSec = automoveDelayMax;
+  const reasons = [];
+
+  if (profile === 'puzzleRush') {
+    minSec = 0.09;
+    maxSec = 0.35;
+    reasons.push('puzzle-rush');
+    minSec = Math.max(0.08, minSec);
+    maxSec = Math.max(minSec, maxSec);
+    return { minSec, maxSec, reasons, ownClockSec: null };
+  }
+
+  const fullmove = getReliableFullmoveNumber();
+  if (automoveFastInOpening && Number.isInteger(fullmove) && fullmove <= 8) {
+    // Keep it fast, but not unrealistically instant (reduces stalled retries).
+    minSec = Math.min(minSec, 0.32);
+    maxSec = Math.min(maxSec, 1.20);
+    reasons.push('opening');
+  }
+
+  const ownClockSec = getOwnClockSecondsRemaining(boardEl, playerSide, turn);
+  if (automoveFastWhenLowTime && Number.isFinite(ownClockSec) && ownClockSec < 30) {
+    minSec = Math.min(minSec, 0.22);
+    maxSec = Math.min(maxSec, 0.90);
+    reasons.push('low-time');
+  }
+
+  minSec = Math.max(0.15, minSec);
+  maxSec = Math.max(minSec, maxSec);
+  return { minSec, maxSec, reasons, ownClockSec };
 }
 
 function updateAutomoveModeUI() {
@@ -824,22 +1100,31 @@ function clearAutomoveSchedule(clearTimer = true) {
   automoveDelayMs = 0;
   automovePlannedMove = null;
   automoveTargetFen = null;
+  automoveScheduledProfile = null;
   if (clearTimer) {
-    const timerEl = document.getElementById('cse-automove-timer');
-    if (timerEl) timerEl.textContent = '';
+    const timerAuto = document.getElementById('cse-mc-timer-automove');
+    const timerPuzzle = document.getElementById('cse-mc-timer-puzzlerush');
+    if (timerAuto) timerAuto.textContent = '';
+    if (timerPuzzle) timerPuzzle.textContent = '';
   }
 }
 
 function updateAutomoveButtonState() {
-  const timerEl = document.getElementById('cse-mc-timer-badge');
-  if (timerEl) {
-    if (!isAutomoveEnabled || !automoveScheduledAt || automoveDelayMs <= 0) {
-      timerEl.textContent = '';
-    } else {
-      const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
-      timerEl.textContent = 'ETA ' + (remainingMs / 1000).toFixed(1) + 's';
-    }
-  }
+  const autoTimerEl = document.getElementById('cse-mc-timer-automove');
+  const puzzleTimerEl = document.getElementById('cse-mc-timer-puzzlerush');
+  const autoPlayTimerEl = document.getElementById('cse-mc-timer-autoplay');
+  const hasActiveTimer = !!(automoveScheduledAt && automoveDelayMs > 0 && automoveScheduledProfile);
+  const timerText = hasActiveTimer
+    ? ('ETA ' + (Math.max(0, automoveDelayMs - (now() - automoveScheduledAt)) / 1000).toFixed(1) + 's')
+    : '';
+  const hasAutoPlayTimer = !!(autoPlayScheduledAt && autoPlayDelayMs > 0);
+  const autoPlayTimerText = hasAutoPlayTimer
+    ? ('ETA ' + (Math.max(0, autoPlayDelayMs - (now() - autoPlayScheduledAt)) / 1000).toFixed(1) + 's')
+    : '';
+
+  if (autoTimerEl) autoTimerEl.textContent = automoveScheduledProfile === 'automove' ? timerText : '';
+  if (puzzleTimerEl) puzzleTimerEl.textContent = automoveScheduledProfile === 'puzzleRush' ? timerText : '';
+  if (autoPlayTimerEl) autoPlayTimerEl.textContent = autoPlayTimerText;
   if (isGuiHudEnabled) syncGuiHudPanel();
 }
 
@@ -895,15 +1180,18 @@ function executeAutomoveMove(bestMove) {
     const isInsideBoard = !!(rawTarget && (rawTarget === boardEl || boardEl.contains(rawTarget)));
     const target = isInsideBoard ? rawTarget : boardEl;
     if (!target) return false;
-    const evt = new MouseEvent(type, {
+    const evtInit = {
       bubbles: true,
       cancelable: true,
+      composed: true,
       view: window,
       clientX: pt.x,
       clientY: pt.y,
       button: 0,
       buttons
-    });
+    };
+    const usePointerEvent = type.startsWith('pointer') && typeof PointerEvent === 'function';
+    const evt = usePointerEvent ? new PointerEvent(type, evtInit) : new MouseEvent(type, evtInit);
     target.dispatchEvent(evt);
     return true;
   };
@@ -926,7 +1214,8 @@ function executeAutomoveMove(bestMove) {
 }
 
 async function performAutomove() {
-  if (!isAutomoveEnabled) {
+  const assistProfile = getActiveMoveAssistProfile();
+  if (!assistProfile) {
     automoveLog('cancel: disabled');
     clearAutomoveSchedule();
     return;
@@ -940,9 +1229,16 @@ async function performAutomove() {
   }
 
   const playerSide = getPlayerSide(boardEl);
-  const turn = detectSideToMove();
-  const bestMove = getAutomoveCandidateMove();
-  const hasPlannedForCurrentFen = !!(automoveTimeout && automoveTargetFen === lastEvalFen && automovePlannedMove);
+  const detectedTurn = detectSideToMove();
+  const fenTurn = normalizeTurn((lastEvalFen || '').split(' ')[1]);
+  const turn = detectedTurn || fenTurn;
+  const bestMove = getAutomoveCandidateMove(assistProfile);
+  const hasPlannedForCurrentFen = !!(
+    automoveTimeout &&
+    automoveTargetFen === lastEvalFen &&
+    automovePlannedMove &&
+    automoveScheduledProfile === assistProfile
+  );
 
   // Keep an already planned move stable for the same FEN to avoid countdown resets
   // (especially in legit mode where candidate can change every eval tick).
@@ -958,6 +1254,7 @@ async function performAutomove() {
 
     if (turnMismatch) {
       automoveLog('cancel: planned move dropped because turn changed', {
+        profile: assistProfile,
         playerSide,
         turn,
         move: automovePlannedMove
@@ -974,10 +1271,13 @@ async function performAutomove() {
     clearAutomoveSchedule(false);
   }
 
-  if (playerSide !== turn || !bestMove || !lastEvalFen || !isMovePlayableNow(bestMove, lastEvalFen)) {
+  if ((playerSide && turn && playerSide !== turn) || !bestMove || !lastEvalFen || !isMovePlayableNow(bestMove, lastEvalFen)) {
     automoveLog('cancel: preconditions', {
+      profile: assistProfile,
       playerSide,
       turn,
+      detectedTurn,
+      fenTurn,
       bestMove,
       lastEvalFen,
       orientationColor: _detectOrientationColor(boardEl),
@@ -993,7 +1293,7 @@ async function performAutomove() {
     return;
   }
 
-  const needsReschedule = !automoveTimeout || automoveTargetFen !== lastEvalFen;
+  const needsReschedule = !automoveTimeout || automoveTargetFen !== lastEvalFen || automoveScheduledProfile !== assistProfile;
   if (!needsReschedule) {
     updateAutomoveButtonState();
     return;
@@ -1002,13 +1302,20 @@ async function performAutomove() {
   clearAutomoveSchedule(false);
   automovePlannedMove = bestMove;
   automoveTargetFen = lastEvalFen;
-  automoveDelayMs = (automoveDelayMin * 1000) + Math.floor(Math.random() * ((automoveDelayMax - automoveDelayMin) * 1000 + 1));
+  automoveScheduledProfile = assistProfile;
+  const delayCfg = computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, assistProfile);
+  const minMs = Math.round(delayCfg.minSec * 1000);
+  const maxMs = Math.round(delayCfg.maxSec * 1000);
+  automoveDelayMs = minMs + Math.floor(Math.random() * (Math.max(0, maxMs - minMs) + 1));
   automoveScheduledAt = now();
   automoveLog('scheduled', {
+    profile: assistProfile,
     move: automovePlannedMove,
     delayMs: automoveDelayMs,
     side: playerSide,
     mode: automoveMode,
+    delayReasons: delayCfg.reasons,
+    ownClockSec: delayCfg.ownClockSec,
     topMoves: (lastEvalTopMoves || []).slice(0, 3)
   });
   updateAutomoveButtonState();
@@ -1016,8 +1323,10 @@ async function performAutomove() {
 
   automoveTimeout = setTimeout(() => {
     automoveTimeout = null;
+    const profile = automoveScheduledProfile;
+    const isProfileEnabled = profile === 'puzzleRush' ? isPuzzleRushEnabled : isAutomoveEnabled;
     const currentBoard = getBoardElement();
-    if (!isAutomoveEnabled || !currentBoard) {
+    if (!isProfileEnabled || !currentBoard) {
       automoveLog('cancel: disabled or board missing at fire time');
       clearAutomoveSchedule();
       return;
@@ -1026,7 +1335,7 @@ async function performAutomove() {
     const nowTurn = detectSideToMove();
     const liveFen = getFenFromPage();
     const liveBoardFen = fenFromPieces();
-    if (side !== nowTurn) {
+    if (side && nowTurn && side !== nowTurn) {
       automoveLog('cancel: not my turn at fire time', { side, nowTurn });
       clearAutomoveSchedule();
       return;
@@ -1049,7 +1358,7 @@ async function performAutomove() {
     const sent = executeAutomoveMove(automovePlannedMove);
     automoveLog('move dispatched', { move: automovePlannedMove, sent });
     if (!sent) {
-      blockAutomoveFor(automoveTargetFen, automovePlannedMove);
+      blockAutomoveFor(automoveTargetFen, automovePlannedMove, 2200);
       clearAutomoveSchedule();
       return;
     }
@@ -1057,11 +1366,12 @@ async function performAutomove() {
     // Verify if turn changed; if not, try one more time quickly.
     sleep(220).then(() => {
       const turnAfter = detectSideToMove();
-      if (!isAutomoveEnabled) {
+      const stillEnabled = profile === 'puzzleRush' ? isPuzzleRushEnabled : isAutomoveEnabled;
+      if (!stillEnabled) {
         clearAutomoveSchedule();
         return;
       }
-      if (turnAfter !== side) {
+      if (!side || !turnAfter || turnAfter !== side) {
         automoveLog('success: turn changed after move', { before: side, after: turnAfter });
         clearAutomoveBlock();
         clearAutomoveSchedule();
@@ -1072,7 +1382,7 @@ async function performAutomove() {
       if (!retrySent) {
         automoveLog('retry failed: dispatch not sent');
       }
-      blockAutomoveFor(automoveTargetFen, automovePlannedMove);
+      blockAutomoveFor(automoveTargetFen, automovePlannedMove, 2200);
       clearAutomoveSchedule();
     });
   }, automoveDelayMs);
@@ -1412,6 +1722,11 @@ function setCachedEval(fen, value) {
   evalCache.set(fen, { ts: now(), value });
 }
 
+function getEvalQueryDepth() {
+  if (isPuzzleContext() && isPuzzleRushEnabled) return Math.max(1, Math.min(30, puzzleRushDepth));
+  return Math.max(1, Math.min(15, suggestMoveDepth));
+}
+
 async function fetchEval(fen) {
   const cached = getCachedEval(fen);
   if (cached) return cached;
@@ -1426,7 +1741,7 @@ async function fetchEval(fen) {
 
   // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
-    const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${suggestMoveDepth}`;
+    const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${getEvalQueryDepth()}`;
     const res = await fetch(url, { signal });
     if (res.ok) {
       const data = await res.json();
@@ -1902,7 +2217,7 @@ function updateEvalBarDisplay(result) {
 }
 const cseGuiState = {
   activeTab: 'ALL',
-  favorites: { AutoMove: false, SuggestMove: false, EvaluationBar: false, GUI: false },
+  favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
 };
 
@@ -1914,6 +2229,8 @@ function applySavedGuiAndModuleState() {
     cseGuiState.favorites = {
       ...cseGuiState.favorites,
       AutoMove: !!saved.favorites.AutoMove,
+      PuzzleRush: !!saved.favorites.PuzzleRush,
+      AutoPlay: !!saved.favorites.AutoPlay,
       SuggestMove: !!saved.favorites.SuggestMove,
       EvaluationBar: !!saved.favorites.EvaluationBar,
       GUI: !!saved.favorites.GUI,
@@ -1926,6 +2243,8 @@ function applySavedGuiAndModuleState() {
 
   if (saved.modules && typeof saved.modules === 'object') {
     isAutomoveEnabled = !!saved.modules.AutoMove;
+    isPuzzleRushEnabled = !!saved.modules.PuzzleRush;
+    isAutoPlayEnabled = !!saved.modules.AutoPlay;
     arrowsEnabled = !!saved.modules.SuggestMove;
     isEvalBarEnabled = !!saved.modules.EvaluationBar;
     isGuiHudEnabled = !!saved.modules.GUI;
@@ -1936,6 +2255,9 @@ function applySavedGuiAndModuleState() {
     if (Number.isFinite(saved.settings.automoveDelayMin)) automoveDelayMin = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMin)));
     if (Number.isFinite(saved.settings.automoveDelayMax)) automoveDelayMax = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMax)));
     if (automoveDelayMax < automoveDelayMin) automoveDelayMax = automoveDelayMin;
+    automoveFastWhenLowTime = !!saved.settings.automoveFastWhenLowTime;
+    automoveFastInOpening = !!saved.settings.automoveFastInOpening;
+    if (Number.isFinite(saved.settings.puzzleRushDepth)) puzzleRushDepth = Math.max(1, Math.min(30, Math.round(saved.settings.puzzleRushDepth)));
     if (Number.isFinite(saved.settings.suggestMoveDepth)) suggestMoveDepth = Math.max(1, Math.min(15, Math.round(saved.settings.suggestMoveDepth)));
   }
 }
@@ -1957,7 +2279,7 @@ function clampToViewport(el, left, top) {
 }
 
 function isEvaluationEngineNeeded() {
-  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled);
+  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled);
 }
 
 function stopEvalEngine() {
@@ -1990,15 +2312,31 @@ function ensureEvalEngineState(forceTick = false) {
 
 function getActiveModuleHudEntries() {
   const entries = [];
+  const activeTimer = (automoveScheduledAt && automoveDelayMs > 0 && automoveScheduledProfile)
+    ? ('ETA ' + (Math.max(0, automoveDelayMs - (now() - automoveScheduledAt)) / 1000).toFixed(1) + 's')
+    : '';
+  const autoPlayTimer = (autoPlayScheduledAt && autoPlayDelayMs > 0)
+    ? ('ETA ' + (Math.max(0, autoPlayDelayMs - (now() - autoPlayScheduledAt)) / 1000).toFixed(1) + 's')
+    : '';
+
   if (isAutomoveEnabled) {
-    let timer = '';
-    if (automoveScheduledAt && automoveDelayMs > 0) {
-      const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
-      timer = 'ETA ' + (remainingMs / 1000).toFixed(1) + 's';
-    }
+    const timer = automoveScheduledProfile === 'automove' ? activeTimer : '';
     entries.push({
       key: 'AutoMove|' + timer,
       html: `AutoMove${timer ? ` <span class="cse-gui-hud-timer">${timer}</span>` : ''}`,
+    });
+  }
+  if (isPuzzleRushEnabled) {
+    const timer = automoveScheduledProfile === 'puzzleRush' ? activeTimer : '';
+    entries.push({
+      key: 'PuzzleRush|' + timer,
+      html: `PuzzleRush${timer ? ` <span class="cse-gui-hud-timer">${timer}</span>` : ''}`,
+    });
+  }
+  if (isAutoPlayEnabled) {
+    entries.push({
+      key: 'AutoPlay|' + autoPlayTimer,
+      html: `AutoPlay${autoPlayTimer ? ` <span class="cse-gui-hud-timer">${autoPlayTimer}</span>` : ''}`,
     });
   }
   if (arrowsEnabled) entries.push({ key: 'SuggestMove', html: 'SuggestMove' });
@@ -2045,6 +2383,8 @@ function cseRenderGui() {
 
   const mods = [
     { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled, hasSettings: true },
+    { id: 'PuzzleRush', label: 'Puzzle Rush', active: isPuzzleRushEnabled, hasSettings: true },
+    { id: 'AutoPlay', label: 'AutoPlay', active: isAutoPlayEnabled, hasSettings: false },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
@@ -2072,6 +2412,8 @@ function cseRenderGui() {
 
     const iconMap = {
       AutoMove: { letter: 'A', color: '#4a9e5c' },
+      PuzzleRush: { letter: 'P', color: '#d35454' },
+      AutoPlay: { letter: 'R', color: '#4ac0a8' },
       SuggestMove: { letter: 'S', color: '#5b8fc9' },
       EvaluationBar: { letter: 'E', color: '#b58a4a' },
       GUI: { letter: 'G', color: '#d8d8d8' },
@@ -2090,7 +2432,7 @@ function cseRenderGui() {
           </div>` : '<div class="cse-mc-dots cse-mc-dots-disabled" title="No settings"><span></span><span></span><span></span></div>'}
         </div>
       </div>
-      <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' && isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-badge"></span>' : ''}</div>
+      <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' && isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-automove"></span>' : ''}${mod.id === 'PuzzleRush' && isPuzzleRushEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-puzzlerush"></span>' : ''}${mod.id === 'AutoPlay' && isAutoPlayEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-autoplay"></span>' : ''}</div>
       <div class="cse-mc-fav ${isFav ? 'cse-mc-fav-on' : ''}" data-id="${mod.id}" title="${isFav ? 'Remove from favorites' : 'Add to favorites'}">&#9733;</div>
     `;
 
@@ -2099,9 +2441,25 @@ function cseRenderGui() {
         isAutomoveEnabled = !isAutomoveEnabled;
         if (!isAutomoveEnabled) {
           clearAutomoveSchedule();
-          stopAutomoveUiTicker();
+          if (!isPuzzleRushEnabled) stopAutomoveUiTicker();
         } else {
           startAutomoveUiTicker();
+        }
+      } else if (mod.id === 'PuzzleRush') {
+        isPuzzleRushEnabled = !isPuzzleRushEnabled;
+        if (!isPuzzleRushEnabled) {
+          clearAutomoveSchedule();
+          if (!isAutomoveEnabled) stopAutomoveUiTicker();
+        } else {
+          startAutomoveUiTicker();
+        }
+      } else if (mod.id === 'AutoPlay') {
+        isAutoPlayEnabled = !isAutoPlayEnabled;
+        if (!isAutoPlayEnabled) {
+          clearAutoPlaySchedule(true);
+          stopAutoPlayTicker();
+        } else {
+          startAutoPlayTicker();
         }
       } else if (mod.id === 'SuggestMove') {
         arrowsEnabled = !arrowsEnabled;
@@ -2116,7 +2474,7 @@ function cseRenderGui() {
       }
 
       ensureEvalEngineState(true);
-      if (isAutomoveEnabled) performAutomove();
+      if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
       updateAutomoveButtonState();
       syncGuiHudPanel();
       cseSaveState();
@@ -2160,6 +2518,7 @@ function cseRenderSettingsPanel(modId) {
   ov.style.display = 'block';
 
   const isAuto = modId === 'AutoMove';
+  const isPuzzleRush = modId === 'PuzzleRush';
   const isDepth = modId === 'SuggestMove' || modId === 'EvaluationBar';
   ov.innerHTML = `
     <div class="cse-mc-spanel">
@@ -2182,6 +2541,26 @@ function cseRenderSettingsPanel(modId) {
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay max</span><span class="cse-mc-sval" id="cse-sp-dmax-val">${automoveDelayMax}s</span></div>
           <input type="range" class="cse-mc-slider" id="cse-sp-dmax" min="1" max="15" step="1" value="${automoveDelayMax}">
+        </div>
+        <div class="cse-mc-srow cse-mc-check-row">
+          <label class="cse-mc-check">
+            <input type="checkbox" id="cse-sp-fast-lowtime" ${automoveFastWhenLowTime ? 'checked' : ''}>
+            <span>Fast under 30s</span>
+          </label>
+        </div>
+        <div class="cse-mc-srow cse-mc-check-row">
+          <label class="cse-mc-check">
+            <input type="checkbox" id="cse-sp-fast-opening" ${automoveFastInOpening ? 'checked' : ''}>
+            <span>Fast in opening (first 8 moves)</span>
+          </label>
+        </div>
+      ` : isPuzzleRush ? `
+        <div class="cse-mc-srow">
+          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-pr-depth-val">${puzzleRushDepth}</span></div>
+          <input type="range" class="cse-mc-slider" id="cse-sp-pr-depth" min="1" max="30" step="1" value="${puzzleRushDepth}">
+        </div>
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">Turbo mode for puzzles only.</span>
         </div>
       ` : isDepth ? `
         <div class="cse-mc-srow">
@@ -2295,6 +2674,32 @@ function cseRenderSettingsPanel(modId) {
       }
       ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
       cseSaveState();
+    });
+
+    const lowtimeCb = ov.querySelector('#cse-sp-fast-lowtime');
+    const openingCb = ov.querySelector('#cse-sp-fast-opening');
+    if (lowtimeCb) {
+      lowtimeCb.addEventListener('change', () => {
+        automoveFastWhenLowTime = !!lowtimeCb.checked;
+        cseSaveState();
+      });
+    }
+    if (openingCb) {
+      openingCb.addEventListener('change', () => {
+        automoveFastInOpening = !!openingCb.checked;
+        cseSaveState();
+      });
+    }
+  } else if (isPuzzleRush) {
+    const prDepth = ov.querySelector('#cse-sp-pr-depth');
+    if (!prDepth) return;
+    prDepth.addEventListener('input', () => {
+      puzzleRushDepth = parseInt(prDepth.value, 10);
+      ov.querySelector('#cse-sp-pr-depth-val').textContent = puzzleRushDepth;
+      evalCache.clear();
+      lastEvalFen = null;
+      cseSaveState();
+      ensureEvalEngineState(true);
     });
   } else if (isDepth) {
     const depSl = ov.querySelector('#cse-sp-depth');
@@ -2519,7 +2924,7 @@ async function tickEvalBar() {
   if (fen === lastEvalFen) {
     if (arrowsEnabled) syncBestMoveOverlay();
     else hideBestMoveOverlay();
-    if (isAutomoveEnabled) performAutomove();
+    if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
     return;
   }
 
@@ -2540,7 +2945,7 @@ async function tickEvalBar() {
 
   updateEvalBarDisplay(result);
   if (!arrowsEnabled) hideBestMoveOverlay();
-  if (isAutomoveEnabled) performAutomove();
+  if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
 }
 
 function toggleToolsGui() {
@@ -2641,7 +3046,8 @@ const observer = new MutationObserver(() => {
 observer.observe(document.body, { childList: true, subtree: true });
 applySavedGuiAndModuleState();
 if (isEvalBarEnabled) createEvaluationBarPanel();
-if (isAutomoveEnabled) startAutomoveUiTicker();
+if (isAutomoveEnabled || isPuzzleRushEnabled) startAutomoveUiTicker();
+if (isAutoPlayEnabled) startAutoPlayTicker();
 syncGuiHudPanel();
 ensureEvalEngineState(true);
 cseSaveState();
@@ -2659,6 +3065,8 @@ new MutationObserver(() => {
     currentBestMove = null;
     lastEvalTopMoves = [];
     lastEvalMoveSourceFen = null;
+    clearAutoPlaySchedule(true);
+    if (isAutoPlayEnabled) performAutoPlayTick();
     setTimeout(scanAndInject, 1000);
   }
 }).observe(document, { subtree: true, childList: true });
