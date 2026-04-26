@@ -165,17 +165,13 @@
 
 /* ── Evaluation Bar ─────────────────────────────────────────── */
 .cse-eval-bar-root {
-  position: fixed;
-  left: 20px;
-  top: 50%;
-  transform: translateY(-50%);
+  position: relative;
   width: 34px;
-  height: 340px;
+  height: 250px;
   background: #1e1e2e;
   border: 1px solid #3a3a5c;
   border-radius: 10px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-  z-index: 99998;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -186,17 +182,6 @@
 }
 
 /* Drag handle at top */
-.cse-eval-drag-handle {
-  font-size: 13px;
-  color: #444466;
-  cursor: grab;
-  line-height: 1;
-  padding: 0 2px;
-  transition: color 0.15s;
-}
-.cse-eval-drag-handle:active { cursor: grabbing; }
-.cse-eval-drag-handle:hover  { color: #7fa650; }
-
 /* The bar itself: fixed height container, children use height% */
 .cse-eval-inner {
   flex: 1;
@@ -243,19 +228,6 @@
   letter-spacing: 0.5px;
 }
 
-.cse-eval-close {
-  background: none;
-  border: none;
-  color: #444466;
-  cursor: pointer;
-  font-size: 10px;
-  padding: 2px;
-  border-radius: 3px;
-  line-height: 1;
-  transition: color 0.15s;
-}
-.cse-eval-close:hover { color: #ff6b6b; }
-
 .cse-eval-score.cse-eval-thinking {
   animation: cse-eval-pulse 1s ease-in-out infinite;
   color: #666688;
@@ -266,7 +238,7 @@
 }
 
 /* ── Eval Toggle Button ─────────────────────────────────────── */
-.cse-eval-toggle-btn {
+.cse-tools-open-btn {
   position: fixed;
   bottom: 20px;
   left: 20px;
@@ -282,74 +254,139 @@
   transition: background 0.15s, transform 0.1s;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
-.cse-eval-toggle-btn:hover {
+.cse-tools-open-btn:hover {
   background: #3a3a60;
   transform: scale(1.05);
 }
-.cse-eval-toggle-btn.cse-eval-active {
+.cse-tools-open-btn.cse-eval-active {
   background: #1a3a1a;
   border-color: #7fa650;
   color: #c8e6a0;
 }
 
 /* ── Arrows Toggle Button ─────────────────────────────────────── */
-.cse-arrows-toggle-btn {
+.cse-tools-modal {
   position: fixed;
-  bottom: 20px;
-  left: 100px;
+  top: 88px;
+  left: 20px;
+  width: 260px;
+  background: #1e1e2e;
+  border: 1px solid #3a3a5c;
+  border-radius: 10px;
+  box-shadow: 0 8px 26px rgba(0,0,0,0.55);
+  z-index: 99998;
+  user-select: none;
+  overflow: hidden;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+.cse-tools-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: #2a2a45;
+  border-bottom: 1px solid #3a3a5c;
+  cursor: grab;
+}
+.cse-tools-modal-header:active { cursor: grabbing; }
+
+.cse-tools-modal-title {
+  color: #c8e6a0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cse-tools-modal-close {
+  background: none;
+  border: none;
+  color: #a0a0c0;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.cse-tools-modal-close:hover {
+  background: #ff4d4d22;
+  color: #ff6b6b;
+}
+
+.cse-tools-modal-body {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px;
+}
+
+.cse-eval-bar-in-modal {
+  height: 220px;
+}
+
+.cse-tools-actions {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cse-modal-action-btn {
+  width: 100%;
   background: #2a2a45;
   border: 1px solid #3a3a5c;
-  border-radius: 8px;
+  border-radius: 7px;
   color: #c8e6a0;
   cursor: pointer;
   font-size: 12px;
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  padding: 5px 10px;
-  z-index: 99997;
-  transition: background 0.15s, transform 0.1s;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  text-align: left;
+  padding: 6px 8px;
+  transition: background 0.15s, border-color 0.15s;
 }
-.cse-arrows-toggle-btn:hover {
+.cse-modal-action-btn:hover {
   background: #3a3a60;
-  transform: scale(1.05);
 }
-.cse-arrows-toggle-btn.cse-arrows-active {
-  background: #1a3a1a;
+.cse-modal-action-btn.cse-arrows-active {
   border-color: #7fa650;
-  color: #c8e6a0;
+  background: #1f3a1f;
 }
 
 /* ── Automove Toggle Button ─────────────────────────────────────── */
-.cse-automove-toggle-btn {
-  position: fixed;
-  bottom: 20px;
-  left: 180px;
-  background: #2a2a45;
-  border: 1px solid #3a3a5c;
-  border-radius: 8px;
-  color: #c8e6a0;
-  cursor: pointer;
-  font-size: 12px;
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  padding: 5px 10px;
-  z-index: 99997;
-  transition: background 0.15s, transform 0.1s;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-}
-.cse-automove-toggle-btn:hover {
-  background: #3a3a60;
-  transform: scale(1.05);
-}
-.cse-automove-toggle-btn.cse-automove-active {
+.cse-modal-action-btn.cse-automove-active {
   background: #3a1a1a;
   border-color: #a65050;
-  color: #e6c0c0;
+  color: #f0d0d0;
+}
+
+.cse-automove-mode-wrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.cse-mode-btn {
+  background: #24243a;
+  border: 1px solid #3a3a5c;
+  border-radius: 6px;
+  color: #b8b8d8;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 5px 6px;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.cse-mode-btn:hover {
+  background: #343455;
+}
+
+.cse-mode-btn.cse-mode-active {
+  background: #1f3a1f;
+  border-color: #7fa650;
+  color: #d6f0b0;
 }
 
 #cse-automove-timer {
-  margin-left: 8px;
+  margin-left: 6px;
   font-family: monospace;
-  font-size: 12px;
+  font-size: 11px;
   color: #c8e6a0;
 }
 

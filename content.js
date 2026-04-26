@@ -247,11 +247,14 @@ async function loadStatsForUser(username) {
 let evalBarPanel = null;
 let evalUpdateInterval = null;
 let lastEvalFen = null;
+let lastEvalMoveSourceFen = null;
 let currentBestMove = null;
+let lastEvalTopMoves = [];
 let bestMoveOverlay = null;
 let evalToggleBtn = null;
-let arrowsToggleBtn = null;
+let toolsModal = null;
 let arrowsEnabled = true; // Toggle per le frecce
+let automoveMode = 'blatant'; // 'blatant' | 'legit'
 const STOCKFISH_ONLINE_DEPTH = 15;
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
@@ -298,6 +301,41 @@ function expandFenBoard(boardPart) {
     board.push(row);
   }
   return board;
+}
+
+function pieceAtFenSquare(board, square) {
+  if (!Array.isArray(board) || !/^[a-h][1-8]$/i.test(square)) return null;
+  const file = square.toLowerCase().charCodeAt(0) - 97; // a=0
+  const rank = parseInt(square[1], 10); // 1..8
+  const row = 8 - rank; // rank8 -> row0
+  return board[row]?.[file] || null;
+}
+
+function isMoveConsistentWithFen(move, fen) {
+  if (!move || !fen || typeof fen !== 'string') return false;
+  const uci = extractUciMove(move);
+  if (!uci || uci.length < 4) return false;
+  const from = uci.slice(0, 2);
+  const to = uci.slice(2, 4);
+  if (!/^[a-h][1-8]$/.test(from) || !/^[a-h][1-8]$/.test(to)) return false;
+
+  const parts = fen.trim().split(/\s+/);
+  if (parts.length < 2) return false;
+  const board = expandFenBoard(parts[0]);
+  const turn = normalizeTurn(parts[1]);
+  if (!board || !turn) return false;
+
+  const fromPiece = pieceAtFenSquare(board, from);
+  if (!fromPiece) return false;
+  const fromColor = /[A-Z]/.test(fromPiece) ? 'w' : 'b';
+  if (fromColor !== turn) return false;
+
+  const toPiece = pieceAtFenSquare(board, to);
+  if (toPiece) {
+    const toColor = /[A-Z]/.test(toPiece) ? 'w' : 'b';
+    if (toColor === fromColor) return false;
+  }
+  return true;
 }
 
 function getCastlingRightsFromBoard(board) {
@@ -406,7 +444,9 @@ function detectTurnFromActiveClock() {
   if (!candidates.length) return null;
 
   const boardEl = getBoardElement();
-  const flipped  = boardEl ? isBoardFlipped(boardEl) : false;
+  if (!boardEl) return null;
+  const explicitFlip = getExplicitBoardFlipState(boardEl);
+  const playerSide = getPlayerSide(boardEl);
 
   for (const clockEl of candidates) {
     const rect = clockEl.getBoundingClientRect();
@@ -420,72 +460,465 @@ function detectTurnFromActiveClock() {
       : window.innerHeight / 2;
     const isBottom   = rect.top + rect.height / 2 > midY;
 
-    // Without flip: bottom = white's clock → white to move.
-    // With flip (playing black): bottom = black's clock → black to move.
-    if (!flipped) return isBottom ? 'w' : 'b';
-    else          return isBottom ? 'b' : 'w';
+    // Preferred mapping when board flip is explicitly known.
+    if (explicitFlip !== null) {
+      if (!explicitFlip) return isBottom ? 'w' : 'b';
+      return isBottom ? 'b' : 'w';
+    }
+
+    // Fallback mapping using detected player side.
+    if (playerSide) {
+      return isBottom ? playerSide : (playerSide === 'w' ? 'b' : 'w');
+    }
   }
 
   return null;
 }
 
+function extractPieceColorFromClassName(className) {
+  if (typeof className !== 'string') return null;
+  if (/(^|\s)w[pnbrqk](\s|$)/i.test(className)) return 'w';
+  if (/(^|\s)b[pnbrqk](\s|$)/i.test(className)) return 'b';
+  return null;
+}
+
+function detectTurnFromBoardHighlights(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
+  const roots = [boardEl.shadowRoot, boardEl].filter(Boolean);
+  const pieceBySq = new Map();
+  const highlighted = [];
+
+  for (const root of roots) {
+    let allSqEls = [];
+    try { allSqEls = Array.from(root.querySelectorAll('[class*="square-"]')); } catch {}
+    for (const el of allSqEls) {
+      const cls = typeof el.className === 'string' ? el.className : String(el.className || '');
+      const sqMatch = cls.match(/square-(\d)(\d)/);
+      if (!sqMatch) continue;
+      const sqKey = sqMatch[1] + sqMatch[2];
+      const color = extractPieceColorFromClassName(cls);
+      if (color) pieceBySq.set(sqKey, color);
+      if (/highlight/i.test(cls)) highlighted.push({ sqKey, cls });
+    }
+  }
+
+  if (!highlighted.length) return null;
+  const ranked = highlighted.sort((a, b) => {
+    const aScore = /last|move|to/i.test(a.cls) ? 2 : 1;
+    const bScore = /last|move|to/i.test(b.cls) ? 2 : 1;
+    return bScore - aScore;
+  });
+
+  for (const h of ranked) {
+    const movedColor = pieceBySq.get(h.sqKey);
+    if (movedColor) return movedColor === 'w' ? 'b' : 'w';
+  }
+  return null;
+}
+
+function getActiveClockElement() {
+  return [
+    document.querySelector('.clock-component.clock-player-turn'),
+    document.querySelector('[class*="clock-player-turn"]'),
+    document.querySelector('.player-clock.clock-player-turn'),
+    document.querySelector('[class*="clock"][class*="player-turn"]')
+  ].find(Boolean) || null;
+}
+
+function isElementBottomHalf(el, boardEl = getBoardElement()) {
+  if (!el) return null;
+  try {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return null;
+    const boardRect = boardEl?.getBoundingClientRect?.();
+    const midY = (boardRect && boardRect.height > 40)
+      ? boardRect.top + boardRect.height / 2
+      : window.innerHeight / 2;
+    return rect.top + rect.height / 2 > midY;
+  } catch {
+    return null;
+  }
+}
+
+// Infer local player side using currently active clock position + known side-to-move.
+function inferPlayerSideFromClockAndTurn(boardEl = getBoardElement()) {
+  const clockEl = getActiveClockElement();
+  if (!clockEl) return null;
+  const isBottom = isElementBottomHalf(clockEl, boardEl);
+  if (isBottom === null) return null;
+
+  const fenTurn = normalizeTurn((lastEvalFen || '').split(' ')[1]);
+  const turn = fenTurn || detectSideToMove();
+  if (!turn) return null;
+
+  // Active clock belongs to side-to-move.
+  // If active clock is bottom, local side == turn; otherwise opposite.
+  return isBottom ? turn : (turn === 'w' ? 'b' : 'w');
+}
+
 // ── Automove ─────────────────────────────────────────────────────────────────
 let isAutomoveEnabled = false;
 let automoveTimeout = null;
+let automoveUiInterval = null;
+let automoveScheduledAt = 0;
+let automoveDelayMs = 0;
+let automovePlannedMove = null;
+let automoveTargetFen = null;
+const AUTOMOVE_DEBUG = true;
+let lastLoggedPlayerSide = null;
+let playerSideCache = { side: null, ts: 0 };
 
-async function performAutomove() {
-  if (!isAutomoveEnabled) return;
-  const boardEl = getBoardElement();
-  if (!boardEl) return;
-  
-  const playerSide = getPlayerSide(boardEl);
-  const turn = detectSideToMove();
-  if (playerSide !== turn) return; // Not my turn
-  
-  const fen = getFenFromPage();
-  if (!fen) return;
-  
-  const result = await fetchEval(fen);
-  if (!result || !result.bestMove) return;
+function isSameFenBoardAndTurn(fenA, fenB) {
+  if (!fenA || !fenB) return true;
+  const a = String(fenA).trim().split(/\s+/);
+  const b = String(fenB).trim().split(/\s+/);
+  if (a.length < 2 || b.length < 2) return true;
+  return a[0] === b[0] && a[1] === b[1];
+}
 
-  const timerEl = document.getElementById('cse-automove-timer');
-  
-  // Random delay 1-5s
-  const delay = Math.floor(Math.random() * 4000) + 1000;
-  
-  for (let i = delay / 1000; i > 0; i--) {
-    if (timerEl) timerEl.textContent = `(${i}s)`;
-    await new Promise(r => setTimeout(r, 1000));
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function automoveLog(...args) {
+  if (!AUTOMOVE_DEBUG) return;
+  console.log('[ChessStats][AutoMove]', ...args);
+}
+
+function logDetectedPlayerColor(boardEl = getBoardElement()) {
+  const side = getPlayerSide(boardEl);
+  if (!side) {
+    if (lastLoggedPlayerSide !== 'unknown') {
+      lastLoggedPlayerSide = 'unknown';
+      console.log('[ChessStats] colore: non rilevato');
+    }
+    return;
   }
-  if (timerEl) timerEl.textContent = '';
-  
-  // Re-check state before moving
-  if (!isAutomoveEnabled || detectSideToMove() !== playerSide) return;
-  
-  const fromSq = result.bestMove.substring(0, 2);
-  const toSq = result.bestMove.substring(2, 4);
-  
+  if (side === lastLoggedPlayerSide) return;
+  lastLoggedPlayerSide = side;
+  console.log(`[ChessStats] colore: ${side === 'b' ? 'nero' : 'bianco'}`);
+}
+
+function detectOrientationFromBoardCoordinates(boardEl) {
+  if (!boardEl) return null;
+  let rect;
+  try {
+    rect = boardEl.getBoundingClientRect();
+  } catch {
+    return null;
+  }
+  if (!rect || rect.width < 80 || rect.height < 80) return null;
+
+  const textNodes = Array.from(document.querySelectorAll('span, div'));
+
+  // Heuristic 1: top-left rank label.
+  let topRank = null;
+  let topRankY = Infinity;
+  for (const el of textNodes) {
+    const t = (el.textContent || '').trim();
+    if (!/^[1-8]$/.test(t)) continue;
+    let r;
+    try { r = el.getBoundingClientRect(); } catch { continue; }
+    if (r.width === 0 || r.height === 0) continue;
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    if (cy < rect.top - 10 || cy > rect.bottom + 10) continue;
+    if (cx < rect.left - 34 || cx > rect.left + 46) continue;
+    if (cy < topRankY) {
+      topRankY = cy;
+      topRank = t;
+    }
+  }
+  if (topRank === '1') return 'b';
+  if (topRank === '8') return 'w';
+
+  // Heuristic 2: left-most file label on the bottom edge.
+  let leftFile = null;
+  let leftFileX = Infinity;
+  for (const el of textNodes) {
+    const t = (el.textContent || '').trim().toLowerCase();
+    if (!/^[a-h]$/.test(t)) continue;
+    let r;
+    try { r = el.getBoundingClientRect(); } catch { continue; }
+    if (r.width === 0 || r.height === 0) continue;
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    if (cx < rect.left - 10 || cx > rect.right + 10) continue;
+    if (cy < rect.bottom - 44 || cy > rect.bottom + 34) continue;
+    if (cx < leftFileX) {
+      leftFileX = cx;
+      leftFile = t;
+    }
+  }
+  if (leftFile === 'h') return 'b';
+  if (leftFile === 'a') return 'w';
+
+  return null;
+}
+
+function inferPlayerSideFromPieceDistribution(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
+  let rect;
+  try { rect = boardEl.getBoundingClientRect(); } catch { return null; }
+  if (!rect || rect.width < 80 || rect.height < 80) return null;
+  const roots = [boardEl.shadowRoot, boardEl].filter(Boolean);
+  let bottomW = 0, bottomB = 0, seen = 0;
+
+  for (const root of roots) {
+    let els = [];
+    try { els = Array.from(root.querySelectorAll('[class*="square-"]')); } catch {}
+    for (const el of els) {
+      const cls = typeof el.className === 'string' ? el.className : String(el.className || '');
+      const color = extractPieceColorFromClassName(cls);
+      if (!color) continue;
+      let er;
+      try { er = el.getBoundingClientRect(); } catch { continue; }
+      if (!er || er.width === 0 || er.height === 0) continue;
+      const cy = er.top + er.height / 2;
+      const bottomHalf = cy > rect.top + rect.height / 2;
+      if (!bottomHalf) continue;
+      seen++;
+      if (color === 'w') bottomW++;
+      else bottomB++;
+    }
+  }
+
+  if (seen < 2) return null;
+  if (bottomW === bottomB) return null;
+  return bottomB > bottomW ? 'b' : 'w';
+}
+
+function getAutomoveCandidateMove() {
+  if (lastEvalMoveSourceFen !== lastEvalFen) return null;
+  const fallbackRaw = extractUciMove(currentBestMove);
+  const fallback = isMoveConsistentWithFen(fallbackRaw, lastEvalFen) ? fallbackRaw : null;
+  if (automoveMode !== 'legit') return fallback;
+  const pool = Array.from(new Set((lastEvalTopMoves || [])
+    .map(extractUciMove)
+    .filter(m => isMoveConsistentWithFen(m, lastEvalFen))
+  )).slice(0, 3);
+  if (!pool.length) return fallback;
+  return pool[Math.floor(Math.random() * pool.length)] || fallback;
+}
+
+function updateAutomoveModeUI() {
+  const legitBtn = document.getElementById('cse-automove-mode-legit');
+  const blatantBtn = document.getElementById('cse-automove-mode-blatant');
+  if (!legitBtn || !blatantBtn) return;
+  legitBtn.classList.toggle('cse-mode-active', automoveMode === 'legit');
+  blatantBtn.classList.toggle('cse-mode-active', automoveMode === 'blatant');
+}
+
+function clearAutomoveSchedule(clearTimer = true) {
+  if (automoveTimeout) {
+    clearTimeout(automoveTimeout);
+    automoveTimeout = null;
+  }
+  automoveScheduledAt = 0;
+  automoveDelayMs = 0;
+  automovePlannedMove = null;
+  automoveTargetFen = null;
+  if (clearTimer) {
+    const timerEl = document.getElementById('cse-automove-timer');
+    if (timerEl) timerEl.textContent = '';
+  }
+}
+
+function updateAutomoveButtonState() {
+  const btn = document.getElementById('cse-automove-toggle-btn');
+  const timerEl = document.getElementById('cse-automove-timer');
+  if (!btn) return;
+
+  btn.classList.toggle('cse-automove-active', isAutomoveEnabled);
+  if (!isAutomoveEnabled) {
+    if (timerEl) timerEl.textContent = '';
+    return;
+  }
+
+  if (!automoveScheduledAt || automoveDelayMs <= 0) {
+    if (timerEl) timerEl.textContent = '';
+    return;
+  }
+
+  const remainingMs = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt));
+  if (timerEl) timerEl.textContent = `(${(remainingMs / 1000).toFixed(1)}s)`;
+}
+
+function startAutomoveUiTicker() {
+  if (automoveUiInterval) return;
+  automoveUiInterval = setInterval(updateAutomoveButtonState, 100);
+}
+
+function stopAutomoveUiTicker() {
+  if (!automoveUiInterval) return;
+  clearInterval(automoveUiInterval);
+  automoveUiInterval = null;
+}
+
+function executeAutomoveMove(bestMove) {
+  const boardEl = getBoardElement();
+  if (!boardEl || !bestMove || bestMove.length < 4) return false;
+
+  const fromSq = bestMove.substring(0, 2);
+  const toSq = bestMove.substring(2, 4);
+  const promotion = bestMove.length >= 5 ? bestMove[4].toLowerCase() : undefined;
   const rect = boardEl.getBoundingClientRect();
   const flipped = isBoardFlipped(boardEl);
   const fromPt = squareToViewportPoint(fromSq, rect, flipped);
   const toPt = squareToViewportPoint(toSq, rect, flipped);
-  
-  if (!fromPt || !toPt) return;
+  if (!fromPt || !toPt) return false;
 
-  const eventOpts = { bubbles: true, cancelable: true, buttons: 1, button: 0 };
-  
-  const fromEl = boardEl.querySelector('.square-' + fromSq);
-  const toEl = boardEl.querySelector('.square-' + toSq);
-  
-  if (!fromEl || !toEl) return;
+  const apiTargets = [boardEl, boardEl?.game, boardEl?.controller].filter(Boolean);
+  const apiMethods = ['move', 'makeMove', 'playMove', 'applyMove', 'tryMove'];
+  for (const target of apiTargets) {
+    for (const method of apiMethods) {
+      const fn = target?.[method];
+      if (typeof fn !== 'function') continue;
+      const argsList = [
+        [bestMove],
+        [{ from: fromSq, to: toSq, promotion }],
+        [fromSq, toSq, promotion],
+        [fromSq + toSq + (promotion || '')]
+      ];
+      for (const args of argsList) {
+        try {
+          const out = fn.apply(target, args);
+          automoveLog('internal api attempt', method, args, out);
+          return true;
+        } catch {}
+      }
+    }
+  }
 
-  const mousedown = new MouseEvent('mousedown', { ...eventOpts, clientX: fromPt.x, clientY: fromPt.y });
-  const mouseup = new MouseEvent('mouseup', { ...eventOpts, clientX: toPt.x, clientY: toPt.y });
-  
-  console.log('[ChessStats] Automove: from', fromEl, 'to', toEl);
-  
-  fromEl.dispatchEvent(mousedown);
-  toEl.dispatchEvent(mouseup);
+  const dispatchAtPoint = (type, pt, buttons = 0) => {
+    const target = document.elementFromPoint(pt.x, pt.y) || boardEl;
+    if (!target) return false;
+    const evt = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: pt.x,
+      clientY: pt.y,
+      button: 0,
+      buttons
+    });
+    target.dispatchEvent(evt);
+    return true;
+  };
+
+  // Try pointer + drag-like interaction first.
+  dispatchAtPoint('pointermove', fromPt, 0);
+  dispatchAtPoint('pointerdown', fromPt, 1);
+  dispatchAtPoint('pointermove', toPt, 1);
+  dispatchAtPoint('pointerup', toPt, 0);
+  dispatchAtPoint('mousemove', fromPt, 0);
+  dispatchAtPoint('mousedown', fromPt, 1);
+  dispatchAtPoint('mousemove', toPt, 1);
+  dispatchAtPoint('mouseup', toPt, 0);
+
+  // Fallback: click source then destination.
+  dispatchAtPoint('click', fromPt, 0);
+  dispatchAtPoint('click', toPt, 0);
+  automoveLog('event fallback sent', { fromSq, toSq, promotion });
+  return true;
+}
+
+async function performAutomove() {
+  if (!isAutomoveEnabled) {
+    automoveLog('cancel: disabled');
+    clearAutomoveSchedule();
+    return;
+  }
+
+  const boardEl = getBoardElement();
+  if (!boardEl) {
+    automoveLog('cancel: no board');
+    clearAutomoveSchedule();
+    return;
+  }
+
+  const playerSide = getPlayerSide(boardEl);
+  const turn = detectSideToMove();
+  const bestMove = getAutomoveCandidateMove();
+  if (playerSide !== turn || !bestMove || !lastEvalFen) {
+    automoveLog('cancel: preconditions', {
+      playerSide,
+      turn,
+      bestMove,
+      lastEvalFen,
+      orientationColor: _detectOrientationColor(boardEl),
+      activeClock: !!getActiveClockElement()
+    });
+    clearAutomoveSchedule();
+    return;
+  }
+
+  const needsReschedule = (
+    !automoveTimeout ||
+    automoveTargetFen !== lastEvalFen ||
+    automovePlannedMove !== bestMove
+  );
+  if (!needsReschedule) {
+    updateAutomoveButtonState();
+    return;
+  }
+
+  clearAutomoveSchedule(false);
+  automovePlannedMove = bestMove;
+  automoveTargetFen = lastEvalFen;
+  automoveDelayMs = 1000 + Math.floor(Math.random() * 4001);
+  automoveScheduledAt = now();
+  automoveLog('scheduled', {
+    move: automovePlannedMove,
+    delayMs: automoveDelayMs,
+    side: playerSide,
+    mode: automoveMode,
+    topMoves: (lastEvalTopMoves || []).slice(0, 3)
+  });
+  updateAutomoveButtonState();
+  startAutomoveUiTicker();
+
+  automoveTimeout = setTimeout(() => {
+    automoveTimeout = null;
+    const currentBoard = getBoardElement();
+    if (!isAutomoveEnabled || !currentBoard) {
+      automoveLog('cancel: disabled or board missing at fire time');
+      clearAutomoveSchedule();
+      return;
+    }
+    const side = getPlayerSide(currentBoard);
+    const nowTurn = detectSideToMove();
+    const liveFen = getFenFromPage();
+    if (side !== nowTurn) {
+      automoveLog('cancel: not my turn at fire time', { side, nowTurn });
+      clearAutomoveSchedule();
+      return;
+    }
+    if (!isSameFenBoardAndTurn(liveFen, automoveTargetFen)) {
+      automoveLog('cancel: position changed before move', { liveFen, target: automoveTargetFen });
+      clearAutomoveSchedule();
+      return;
+    }
+    const sent = executeAutomoveMove(automovePlannedMove);
+    automoveLog('move dispatched', { move: automovePlannedMove, sent });
+
+    // Verify if turn changed; if not, try one more time quickly.
+    sleep(220).then(() => {
+      const turnAfter = detectSideToMove();
+      if (!isAutomoveEnabled) {
+        clearAutomoveSchedule();
+        return;
+      }
+      if (turnAfter !== side) {
+        automoveLog('success: turn changed after move', { before: side, after: turnAfter });
+        clearAutomoveSchedule();
+        return;
+      }
+      automoveLog('retry: turn unchanged after first dispatch');
+      executeAutomoveMove(automovePlannedMove);
+      clearAutomoveSchedule();
+    });
+  }, automoveDelayMs);
 }
 
 function detectSideToMove() {
@@ -513,6 +946,10 @@ function detectSideToMove() {
     const turnFromState = findTurnInObject(el);
     if (turnFromState) return turnFromState;
   }
+
+  // ── Priority 1.5: board highlights (last move destination piece color) ───
+  const hlTurn = detectTurnFromBoardHighlights();
+  if (hlTurn) return hlTurn;
 
   // ── Priority 2: ply count from move list ─────────────────────────────────
   // After N completed plies: N=0 → white, N=1 → black, N=2 → white …
@@ -721,10 +1158,6 @@ function fenFromPieces() {
 
   const board = Array.from({ length: 8 }, () => Array(8).fill(null));
 
-  // Detect board flip using the same unified function used everywhere else
-  const boardEl = document.querySelector('chess-board, wc-chess-board');
-  const flipped = boardEl ? isBoardFlipped(boardEl) : false;
-
   for (const el of pieceEls) {
     const classes = Array.from(el.classList);
 
@@ -743,8 +1176,10 @@ function fenFromPieces() {
 
     // In FEN, row 0 = rank 8 (top). square-X8 = rank 8 = row 0.
     // chess.com square-XY: X=file(1-8), Y=rank(1-8)
-    const col = flipped ? 7 - file : file;
-    const row = flipped ? rank : 7 - rank;
+    // Important: FEN coordinates are always white-oriented and MUST NOT depend
+    // on the current UI board orientation (flipped when playing black).
+    const col = file;
+    const row = 7 - rank;
 
     board[row][col] = pieceMap[pieceClass];
   }
@@ -813,6 +1248,8 @@ async function fetchEval(fen) {
   evalAbortController = new AbortController();
   const signal = evalAbortController.signal;
   const turn = fen.split(' ')[1] || 'w';
+  const normalizeTopMoves = (moves) =>
+    Array.from(new Set((moves || []).map(extractUciMove).filter(Boolean))).slice(0, 3);
 
   // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
@@ -823,14 +1260,14 @@ async function fetchEval(fen) {
       if (data.success) {
         const bestMove = extractUciMove(data.bestmove);
         if (data.mate !== null && data.mate !== undefined && data.mate !== 0) {
-          const result = { cp: null, mate: turn === 'w' ? data.mate : -data.mate, bestMove };
+          const result = { cp: null, mate: turn === 'w' ? data.mate : -data.mate, bestMove, topMoves: normalizeTopMoves([bestMove]) };
           setCachedEval(fen, result);
           return result;
         }
         const cpRaw = Math.round(parseFloat(data.evaluation) * 100);
         const cp = turn === 'w' ? cpRaw : -cpRaw;
         if (!isNaN(cp)) {
-          const result = { cp, mate: null, bestMove };
+          const result = { cp, mate: null, bestMove, topMoves: normalizeTopMoves([bestMove]) };
           setCachedEval(fen, result);
           return result;
         }
@@ -842,20 +1279,21 @@ async function fetchEval(fen) {
 
   // Fallback: Lichess cloud-eval (instant if cached, 404 if not)
   try {
-    const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=1`;
+    const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=3`;
     const res = await fetch(url, { headers: { 'Accept': 'application/json' }, signal });
     if (res.ok) {
       const data = await res.json();
+      const topMoves = normalizeTopMoves((data.pvs || []).map(pv => pv.moves));
       const pv = data.pvs && data.pvs[0];
       if (pv) {
         const bestMove = extractUciMove(pv.moves);
         if (pv.mate !== undefined) {
-          const result = { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove };
+          const result = { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove, topMoves: normalizeTopMoves([bestMove, ...topMoves]) };
           setCachedEval(fen, result);
           return result;
         }
         if (pv.cp  !== undefined) {
-          const result = { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove };
+          const result = { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove, topMoves: normalizeTopMoves([bestMove, ...topMoves]) };
           setCachedEval(fen, result);
           return result;
         }
@@ -970,20 +1408,24 @@ function _detectOrientationColor(boardEl) {
     }
   }
 
+  // ── 8. Board coordinate labels (works when attributes/classes are missing) ──
+  const coordColor = detectOrientationFromBoardCoordinates(boardEl);
+  if (coordColor) return coordColor;
+
   return null; // genuinely unknown
 }
 
 function isBoardFlipped(boardEl = getBoardElement()) {
-  const color = _detectOrientationColor(boardEl);
-  if (color === 'b') return true;
-  if (color === 'w') return false;
-  return false; // safe default: assume normal orientation
+  const playerSide = getPlayerSide(boardEl);
+  if (playerSide === 'b') return true;
+  if (playerSide === 'w') return false;
+  return false; // safe default
 }
 
 function getExplicitBoardFlipState(boardEl = getBoardElement()) {
-  const color = _detectOrientationColor(boardEl);
-  if (color === 'b') return true;
-  if (color === 'w') return false;
+  const playerSide = getPlayerSide(boardEl);
+  if (playerSide === 'b') return true;
+  if (playerSide === 'w') return false;
   return null;
 }
 
@@ -1084,18 +1526,33 @@ function getLoggedInUsername() {
 // Returns 'w' or 'b' (the side the local player is playing), or null.
 function getPlayerSide(boardEl = getBoardElement()) {
   if (!boardEl) return null;
+  if (playerSideCache.side && now() - playerSideCache.ts < 3000) return playerSideCache.side;
 
   // A/A2/B/C/D: use the shared orientation detector (checks attributes, JS props, username pos, etc.)
   const color = _detectOrientationColor(boardEl);
-  if (color) return color;
+  if (color) {
+    playerSideCache = { side: color, ts: now() };
+    return color;
+  }
 
-  // Last resort: fallback to isBoardFlipped (no circular dep since _detectOrientationColor is the shared core)
-  return isBoardFlipped(boardEl) ? 'b' : 'w';
+  const inferred = inferPlayerSideFromClockAndTurn(boardEl);
+  if (inferred) {
+    playerSideCache = { side: inferred, ts: now() };
+    return inferred;
+  }
+
+  const byPieces = inferPlayerSideFromPieceDistribution(boardEl);
+  if (byPieces) {
+    playerSideCache = { side: byPieces, ts: now() };
+    return byPieces;
+  }
+
+  // Do not guess: unknown is safer than assuming white.
+  return null;
 }
 
 function shouldDisplayBestMoveArrow(boardEl = getBoardElement()) {
   // Show arrow only when it is the player's turn to move.
-  // If we cannot determine the player's side, always show.
   if (!boardEl || !lastEvalFen) return true;
 
   const fenTurn = normalizeTurn(lastEvalFen.split(' ')[1]);
@@ -1141,6 +1598,7 @@ function hideArrow(svg, lineId, startId) {
 
 function syncBestMoveOverlay() {
   if (!arrowsEnabled || !currentBestMove) return hideBestMoveOverlay();
+  if (!isMoveConsistentWithFen(currentBestMove, lastEvalFen)) return hideBestMoveOverlay();
 
   const boardEl = getBoardElement();
   if (!boardEl) return hideBestMoveOverlay();
@@ -1207,10 +1665,15 @@ function updateEvalBarDisplay(result) {
     scoreEl.textContent = '?';
     scoreEl.className = 'cse-eval-score';
     bar.title = 'Eval non disponibile (posizione non trovata o API non raggiungibile)';
+    currentBestMove = null;
+    lastEvalTopMoves = [];
+    lastEvalMoveSourceFen = null;
     clearBestMoveOverlay();
     return;
   }
 
+  lastEvalMoveSourceFen = lastEvalFen;
+  lastEvalTopMoves = Array.isArray(result.topMoves) ? result.topMoves.slice(0, 3) : [];
   setBestMove(result.bestMove);
   bar.title = result.bestMove ? `Best move: ${result.bestMove}` : '';
   let whitePct, label, cls;
@@ -1238,48 +1701,91 @@ function updateEvalBarDisplay(result) {
 }
 
 function createEvalBar() {
-  if (evalBarPanel) return evalBarPanel;
+  if (toolsModal?.isConnected && evalBarPanel) return evalBarPanel;
 
-  const bar = document.createElement('div');
-  bar.className = 'cse-eval-bar-root';
-  bar.innerHTML = `
-    <div class="cse-eval-drag-handle" id="cse-eval-drag" title="Trascina per spostare">⠿</div>
-    <div class="cse-eval-inner" id="cse-eval-inner">
-      <div class="cse-eval-black" data-cse-part="black" style="height:50%"></div>
-      <div class="cse-eval-white" data-cse-part="white" style="height:50%"></div>
+  const modal = document.createElement('div');
+  modal.className = 'cse-tools-modal';
+  modal.innerHTML = `
+    <div class="cse-tools-modal-header" id="cse-tools-drag">
+      <span class="cse-tools-modal-title">Chess Tools</span>
+      <button class="cse-tools-modal-close" id="cse-tools-close" title="Chiudi">X</button>
     </div>
-    <div class="cse-eval-score" data-cse-part="score">…</div>
-    <div class="cse-eval-label">Eval</div>
-    <button class="cse-eval-close" id="cse-eval-close-btn" title="Chiudi">✕</button>
+    <div class="cse-tools-modal-body">
+      <div class="cse-eval-bar-root cse-eval-bar-in-modal">
+        <div class="cse-eval-inner">
+          <div class="cse-eval-black" data-cse-part="black" style="height:50%"></div>
+          <div class="cse-eval-white" data-cse-part="white" style="height:50%"></div>
+        </div>
+        <div class="cse-eval-score" data-cse-part="score">...</div>
+        <div class="cse-eval-label">Eval</div>
+      </div>
+      <div class="cse-tools-actions">
+        <button class="cse-modal-action-btn ${arrowsEnabled ? 'cse-arrows-active' : ''}" id="cse-arrows-toggle-btn" title="Mostra/nascondi frecce">
+          -> Arrows
+        </button>
+        <button class="cse-modal-action-btn" id="cse-automove-toggle-btn" title="Attiva/disattiva Automove">
+          AutoMove <span id="cse-automove-timer"></span>
+        </button>
+        <div class="cse-automove-mode-wrap">
+          <button class="cse-mode-btn" id="cse-automove-mode-blatant" title="Gioca sempre la miglior mossa">Blatant</button>
+          <button class="cse-mode-btn" id="cse-automove-mode-legit" title="Alterna random tra top 3">Legit</button>
+        </div>
+      </div>
+    </div>
   `;
-  document.body.appendChild(bar);
+  document.body.appendChild(modal);
 
-  bar.querySelector('#cse-eval-close-btn').addEventListener('click', removeEvalBar);
-  makeEvalBarDraggable(bar);
+  modal.querySelector('#cse-tools-close').addEventListener('click', removeEvalBar);
 
-  evalBarPanel = bar;
-  return bar;
-}
+  const arrowsBtn = modal.querySelector('#cse-arrows-toggle-btn');
+  arrowsBtn.addEventListener('click', () => {
+    arrowsEnabled = !arrowsEnabled;
+    arrowsBtn.classList.toggle('cse-arrows-active', arrowsEnabled);
+    if (!arrowsEnabled) hideBestMoveOverlay();
+    else syncBestMoveOverlay();
+  });
 
-function makeEvalBarDraggable(bar) {
-  const handle = bar.querySelector('#cse-eval-drag');
+  const automoveBtn = modal.querySelector('#cse-automove-toggle-btn');
+  automoveBtn.addEventListener('click', () => {
+    isAutomoveEnabled = !isAutomoveEnabled;
+    if (!isAutomoveEnabled) {
+      clearAutomoveSchedule();
+      stopAutomoveUiTicker();
+    } else {
+      startAutomoveUiTicker();
+      performAutomove();
+    }
+    updateAutomoveButtonState();
+  });
+
+  const modeBlatantBtn = modal.querySelector('#cse-automove-mode-blatant');
+  const modeLegitBtn = modal.querySelector('#cse-automove-mode-legit');
+  modeBlatantBtn.addEventListener('click', () => {
+    automoveMode = 'blatant';
+    updateAutomoveModeUI();
+  });
+  modeLegitBtn.addEventListener('click', () => {
+    automoveMode = 'legit';
+    updateAutomoveModeUI();
+  });
+
+  const handle = modal.querySelector('#cse-tools-drag');
   let startX, startY, startLeft, startTop;
 
   handle.addEventListener('mousedown', e => {
     e.preventDefault();
-    const rect = bar.getBoundingClientRect();
+    if (e.target.closest('#cse-tools-close')) return;
+    const rect = modal.getBoundingClientRect();
     startX = e.clientX; startY = e.clientY;
     startLeft = rect.left; startTop = rect.top;
 
-    // Switch from right-anchored to left-anchored positioning
-    bar.style.right = 'auto';
-    bar.style.left = rect.left + 'px';
-    bar.style.top  = rect.top  + 'px';
-    bar.style.transform = 'none';
+    modal.style.right = 'auto';
+    modal.style.left = rect.left + 'px';
+    modal.style.top  = rect.top  + 'px';
 
     function onMove(e) {
-      bar.style.left = (startLeft + e.clientX - startX) + 'px';
-      bar.style.top  = (startTop  + e.clientY - startY) + 'px';
+      modal.style.left = (startLeft + e.clientX - startX) + 'px';
+      modal.style.top  = (startTop  + e.clientY - startY) + 'px';
     }
     function onUp() {
       document.removeEventListener('mousemove', onMove);
@@ -1288,14 +1794,27 @@ function makeEvalBarDraggable(bar) {
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup',   onUp);
   });
+
+  toolsModal = modal;
+  evalBarPanel = modal.querySelector('.cse-eval-bar-root');
+  updateAutomoveButtonState();
+  updateAutomoveModeUI();
+  if (isAutomoveEnabled) startAutomoveUiTicker();
+  return evalBarPanel;
 }
 
 function removeEvalBar() {
   if (evalUpdateInterval) { clearInterval(evalUpdateInterval); evalUpdateInterval = null; }
   evalRequestSeq++;
-  if (evalBarPanel) { evalBarPanel.remove(); evalBarPanel = null; }
+  stopAutomoveUiTicker();
+  clearAutomoveSchedule();
+  if (toolsModal) { toolsModal.remove(); toolsModal = null; }
+  evalBarPanel = null;
   clearBestMoveOverlay();
   lastEvalFen = null;
+  lastEvalMoveSourceFen = null;
+  currentBestMove = null;
+  lastEvalTopMoves = [];
   if (evalToggleBtn) evalToggleBtn.classList.remove('cse-eval-active');
 }
 
@@ -1304,15 +1823,20 @@ let evalPending = false;
 async function tickEvalBar() {
   const bar = evalBarPanel;
   if (!bar) return;
+  logDetectedPlayerColor(getBoardElement());
 
   const fen = getFenFromPage();
 
   if (!fen) {
     evalRequestSeq++;
     lastEvalFen = null;
+    lastEvalMoveSourceFen = null;
+    currentBestMove = null;
+    lastEvalTopMoves = [];
     bar.querySelector('[data-cse-part="score"]').textContent = '?';
     bar.title = 'Posizione non trovata sulla board';
     hideBestMoveOverlay();
+    clearAutomoveSchedule();
     return;
   }
 
@@ -1355,28 +1879,12 @@ function injectEvalToggleButton() {
   if (evalToggleBtn?.isConnected) return;
 
   const btn = document.createElement('button');
-  btn.className = 'cse-eval-toggle-btn';
-  btn.title = 'Mostra/nascondi Evaluation Bar';
-  btn.textContent = '🧠 Eval';
+  btn.className = 'cse-tools-open-btn';
+  btn.title = 'Apri/chiudi Tools';
+  btn.textContent = 'Tools';
   btn.addEventListener('click', toggleEvalBar);
   document.body.appendChild(btn);
   evalToggleBtn = btn;
-}
-
-let automoveToggleBtn = null;
-function injectAutomoveToggleButton() {
-  if (automoveToggleBtn?.isConnected) return;
-
-  const btn = document.createElement('button');
-  btn.className = 'cse-automove-toggle-btn';
-  btn.title = 'Attiva/disattiva Automove';
-  btn.innerHTML = '🤖 Automove <span id="cse-automove-timer"></span>';
-  btn.addEventListener('click', () => {
-    isAutomoveEnabled = !isAutomoveEnabled;
-    btn.classList.toggle('cse-automove-active', isAutomoveEnabled);
-  });
-  document.body.appendChild(btn);
-  automoveToggleBtn = btn;
 }
 
 // ─── Inject Buttons ───────────────────────────────────────────────────────────
@@ -1430,23 +1938,6 @@ function scanAndInject() {
 
 // ─── Observer ────────────────────────────────────────────────────────────────
 
-function injectArrowsToggleButton() {
-  if (arrowsToggleBtn?.isConnected) return;
-
-  const btn = document.createElement('button');
-  btn.className = 'cse-arrows-toggle-btn cse-arrows-active';
-  btn.title = 'Mostra/nascondi frecce della miglior mossa';
-  btn.textContent = '➤ Arrows';
-  btn.addEventListener('click', () => {
-    arrowsEnabled = !arrowsEnabled;
-    btn.classList.toggle('cse-arrows-active', arrowsEnabled);
-    if (!arrowsEnabled) hideBestMoveOverlay();
-    else syncBestMoveOverlay();
-  });
-  document.body.appendChild(btn);
-  arrowsToggleBtn = btn;
-}
-
 function scanAndInjectEval() {
   // Only show eval button if a chess board is visible on the page
   const hasBoard = document.querySelector(
@@ -1454,8 +1945,6 @@ function scanAndInjectEval() {
   );
   if (hasBoard) {
     injectEvalToggleButton();
-    injectArrowsToggleButton();
-    injectAutomoveToggleButton();
   }
 }
 
@@ -1472,6 +1961,10 @@ let lastUrl = location.href;
 new MutationObserver(() => {
   if (location.href !== lastUrl) {
     lastUrl = location.href;
+    playerSideCache = { side: null, ts: 0 };
+    lastLoggedPlayerSide = null;
     setTimeout(scanAndInject, 1000);
   }
 }).observe(document, { subtree: true, childList: true });
+
+
