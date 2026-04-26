@@ -472,16 +472,19 @@ async function performAutomove() {
   
   if (!fromPt || !toPt) return;
 
-  const eventOpts = { bubbles: true, cancelable: true };
-  const mousedown = new MouseEvent('mousedown', eventOpts);
-  const mouseup = new MouseEvent('mouseup', eventOpts);
+  const eventOpts = { bubbles: true, cancelable: true, buttons: 1, button: 0 };
   
-  const fromEl = document.elementFromPoint(fromPt.x, fromPt.y);
-  const toEl = document.elementFromPoint(toPt.x, toPt.y);
+  const fromEl = boardEl.querySelector('.square-' + fromSq);
+  const toEl = boardEl.querySelector('.square-' + toSq);
+  
+  if (!fromEl || !toEl) return;
+
+  const mousedown = new MouseEvent('mousedown', { ...eventOpts, clientX: fromPt.x, clientY: fromPt.y });
+  const mouseup = new MouseEvent('mouseup', { ...eventOpts, clientX: toPt.x, clientY: toPt.y });
+  
+  console.log('[ChessStats] Automove: from', fromEl, 'to', toEl);
   
   fromEl.dispatchEvent(mousedown);
-  fromEl.dispatchEvent(mouseup);
-  toEl.dispatchEvent(mousedown);
   toEl.dispatchEvent(mouseup);
 }
 
