@@ -319,6 +319,40 @@
   color: #c8e6a0;
 }
 
+/* ── Automove Toggle Button ─────────────────────────────────────── */
+.cse-automove-toggle-btn {
+  position: fixed;
+  bottom: 20px;
+  left: 180px;
+  background: #2a2a45;
+  border: 1px solid #3a3a5c;
+  border-radius: 8px;
+  color: #c8e6a0;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  padding: 5px 10px;
+  z-index: 99997;
+  transition: background 0.15s, transform 0.1s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.cse-automove-toggle-btn:hover {
+  background: #3a3a60;
+  transform: scale(1.05);
+}
+.cse-automove-toggle-btn.cse-automove-active {
+  background: #3a1a1a;
+  border-color: #a65050;
+  color: #e6c0c0;
+}
+
+#cse-automove-timer {
+  margin-left: 8px;
+  font-family: monospace;
+  font-size: 12px;
+  color: #c8e6a0;
+}
+
 /* ── Best Move Arrow Overlay ─────────────────────────────────── */
 .cse-bestmove-overlay {
   position: fixed;

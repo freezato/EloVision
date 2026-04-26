@@ -429,6 +429,62 @@ function detectTurnFromActiveClock() {
   return null;
 }
 
+// ── Automove ─────────────────────────────────────────────────────────────────
+let isAutomoveEnabled = false;
+let automoveTimeout = null;
+
+async function performAutomove() {
+  if (!isAutomoveEnabled) return;
+  const boardEl = getBoardElement();
+  if (!boardEl) return;
+  
+  const playerSide = getPlayerSide(boardEl);
+  const turn = detectSideToMove();
+  if (playerSide !== turn) return; // Not my turn
+  
+  const fen = getFenFromPage();
+  if (!fen) return;
+  
+  const result = await fetchEval(fen);
+  if (!result || !result.bestMove) return;
+
+  const timerEl = document.getElementById('cse-automove-timer');
+  
+  // Random delay 1-5s
+  const delay = Math.floor(Math.random() * 4000) + 1000;
+  
+  for (let i = delay / 1000; i > 0; i--) {
+    if (timerEl) timerEl.textContent = `(${i}s)`;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  if (timerEl) timerEl.textContent = '';
+  
+  // Re-check state before moving
+  if (!isAutomoveEnabled || detectSideToMove() !== playerSide) return;
+  
+  const fromSq = result.bestMove.substring(0, 2);
+  const toSq = result.bestMove.substring(2, 4);
+  
+  const rect = boardEl.getBoundingClientRect();
+  const flipped = isBoardFlipped(boardEl);
+  const fromPt = squareToViewportPoint(fromSq, rect, flipped);
+  const toPt = squareToViewportPoint(toSq, rect, flipped);
+  
+  if (!fromPt || !toPt) return;
+
+  const eventOpts = { bubbles: true, cancelable: true };
+  const mousedown = new MouseEvent('mousedown', eventOpts);
+  const mouseup = new MouseEvent('mouseup', eventOpts);
+  
+  const fromEl = document.elementFromPoint(fromPt.x, fromPt.y);
+  const toEl = document.elementFromPoint(toPt.x, toPt.y);
+  
+  fromEl.dispatchEvent(mousedown);
+  fromEl.dispatchEvent(mouseup);
+  toEl.dispatchEvent(mousedown);
+  toEl.dispatchEvent(mouseup);
+}
+
 function detectSideToMove() {
   // ── Priority 0: active clock (most reliable for live games) ──────────────
   const clockTurn = detectTurnFromActiveClock();
@@ -1260,6 +1316,7 @@ async function tickEvalBar() {
   if (fen === lastEvalFen) {
     // Position unchanged — just keep overlay in sync (board may have scrolled/resized)
     syncBestMoveOverlay();
+    performAutomove();
     return;
   }
   lastEvalFen = fen;
@@ -1274,6 +1331,7 @@ async function tickEvalBar() {
   if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
 
   updateEvalBarDisplay(result);
+  performAutomove();
 }
 
 function toggleEvalBar() {
@@ -1300,6 +1358,22 @@ function injectEvalToggleButton() {
   btn.addEventListener('click', toggleEvalBar);
   document.body.appendChild(btn);
   evalToggleBtn = btn;
+}
+
+let automoveToggleBtn = null;
+function injectAutomoveToggleButton() {
+  if (automoveToggleBtn?.isConnected) return;
+
+  const btn = document.createElement('button');
+  btn.className = 'cse-automove-toggle-btn';
+  btn.title = 'Attiva/disattiva Automove';
+  btn.innerHTML = '🤖 Automove <span id="cse-automove-timer"></span>';
+  btn.addEventListener('click', () => {
+    isAutomoveEnabled = !isAutomoveEnabled;
+    btn.classList.toggle('cse-automove-active', isAutomoveEnabled);
+  });
+  document.body.appendChild(btn);
+  automoveToggleBtn = btn;
 }
 
 // ─── Inject Buttons ───────────────────────────────────────────────────────────
@@ -1378,6 +1452,7 @@ function scanAndInjectEval() {
   if (hasBoard) {
     injectEvalToggleButton();
     injectArrowsToggleButton();
+    injectAutomoveToggleButton();
   }
 }
 
