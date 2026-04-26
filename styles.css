@@ -319,45 +319,24 @@
   color: #c8e6a0;
 }
 
+/* ── Best Move Arrow Overlay ─────────────────────────────────── */
 .cse-bestmove-overlay {
   position: fixed;
   left: 0;
   top: 0;
-  width: 0;
-  height: 0;
+  width: 100vw;
+  height: 100vh;
   pointer-events: none;
   z-index: 99996;
   opacity: 0;
   transition: opacity 0.12s ease;
 }
-
 .cse-bestmove-overlay.cse-bestmove-visible {
   opacity: 1;
 }
-
 .cse-bestmove-svg {
   width: 100%;
   height: 100%;
   overflow: visible;
-  filter: drop-shadow(0 0 6px rgba(127, 166, 80, 0.55));
-}
-
-.cse-bestmove-line {
-  stroke: rgba(127, 166, 80, 0.88);
-  stroke-width: 10;
-  stroke-linecap: round;
-  marker-end: none;
-}
-
-.cse-bestmove-start {
-  fill: rgba(127, 166, 80, 0.28);
-  stroke: rgba(127, 166, 80, 0.95);
-  stroke-width: 2;
-}
-
-.cse-bestmove-head {
-  fill: rgba(127, 166, 80, 0.95);
-  stroke: rgba(235, 247, 214, 0.95);
-  stroke-width: 1.5;
-  stroke-linejoin: round;
+  filter: drop-shadow(0 0 5px rgba(0,0,0,0.5));
 }

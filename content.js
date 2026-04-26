@@ -326,7 +326,9 @@ function getPlyCountFromMoveList() {
       if (!Number.isNaN(ply)) maxIndexedPly = Math.max(maxIndexedPly, ply);
     }
   }
-  if (maxIndexedPly >= 0) return maxIndexedPly + 1;
+  // chess.com ply attributes are 1-based (first white move = ply 1).
+  // maxIndexedPly IS the number of completed half-moves, no +1 needed.
+  if (maxIndexedPly >= 0) return maxIndexedPly;
 
   const scopes = Array.from(document.querySelectorAll(
     '.vertical-move-list, .vertical-move-list-component, .move-list, .move-list-component, [data-cy="move-list"], .notation-window, [class*="notation"]'
@@ -390,7 +392,49 @@ function findTurnInObject(root, maxDepth = 2, maxNodes = 120) {
   return null;
 }
 
+// ── Active clock detection (most reliable for live online games) ──────────────
+// chess.com adds 'clock-player-turn' to the clock element of whoever is to move.
+function detectTurnFromActiveClock() {
+  // Possible selectors for the currently-ticking clock
+  const candidates = [
+    document.querySelector('.clock-component.clock-player-turn'),
+    document.querySelector('[class*="clock-player-turn"]'),
+    document.querySelector('.player-clock.clock-player-turn'),
+    document.querySelector('[class*="clock"][class*="player-turn"]')
+  ].filter(Boolean);
+
+  if (!candidates.length) return null;
+
+  const boardEl = getBoardElement();
+  const flipped  = boardEl ? isBoardFlipped(boardEl) : false;
+
+  for (const clockEl of candidates) {
+    const rect = clockEl.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+
+    // Determine whether this clock is in the bottom half of the viewport.
+    // Bottom = local player's side on a normal (white-at-bottom) board.
+    const boardRect  = boardEl ? boardEl.getBoundingClientRect() : null;
+    const midY       = boardRect
+      ? boardRect.top + boardRect.height / 2
+      : window.innerHeight / 2;
+    const isBottom   = rect.top + rect.height / 2 > midY;
+
+    // Without flip: bottom = white's clock → white to move.
+    // With flip (playing black): bottom = black's clock → black to move.
+    if (!flipped) return isBottom ? 'w' : 'b';
+    else          return isBottom ? 'b' : 'w';
+  }
+
+  return null;
+}
+
 function detectSideToMove() {
+  // ── Priority 0: active clock (most reliable for live games) ──────────────
+  const clockTurn = detectTurnFromActiveClock();
+  if (clockTurn) return clockTurn;
+
+  // ── Priority 1: board element attributes / JS state ──────────────────────
   const boardEls = document.querySelectorAll('chess-board, wc-chess-board, [data-turn], [data-side-to-move]');
 
   for (const el of boardEls) {
@@ -411,8 +455,10 @@ function detectSideToMove() {
     if (turnFromState) return turnFromState;
   }
 
+  // ── Priority 2: ply count from move list ─────────────────────────────────
+  // After N completed plies: N=0 → white, N=1 → black, N=2 → white …
   const plyCount = getPlyCountFromMoveList();
-  if (Number.isInteger(plyCount)) return plyCount % 2 === 0 ? 'w' : 'b';
+  if (Number.isInteger(plyCount) && plyCount >= 0) return plyCount % 2 === 0 ? 'w' : 'b';
 
   return 'w';
 }
@@ -498,28 +544,52 @@ function findFenInObject(root, maxDepth = FEN_SEARCH_MAX_DEPTH, maxNodes = FEN_S
 }
 
 function getFenFromPage() {
+  // inferredTurn is used only when a FEN has no explicit turn field.
+  // Clock detection is now the highest priority inside detectSideToMove().
   const inferredTurn = detectSideToMove();
+
   // ── Method 1: Direct JS properties on the custom element ──────
-  // chess.com exposes game state directly on chess-board / wc-chess-board
+  // chess.com exposes game state on chess-board / wc-chess-board.
+  // We also look for playerColor so we can pass it to normalizeFen as a hint
+  // when the FEN string itself lacks a turn field.
   for (const sel of ['chess-board', 'wc-chess-board']) {
     const el = document.querySelector(sel);
     if (!el) continue;
+
+    // Try to read the player's color from the element for use as a cross-check
+    let elemTurnHint = null;
+    try {
+      for (const src of [el, el.game, el.controller]) {
+        if (!src) continue;
+        for (const key of ['turn', 'sideToMove', 'colorToMove', 'activeColor']) {
+          try {
+            const raw = typeof src[key] === 'function' ? src[key]() : src[key];
+            const t = normalizeTurn(raw);
+            if (t) { elemTurnHint = t; break; }
+          } catch {}
+        }
+        if (elemTurnHint) break;
+      }
+    } catch {}
+
+    const turnHint = elemTurnHint || inferredTurn;
+
     try {
       if (el.game) {
-        const fen = findFenInObject(el.game);
+        const fen = findFenInObject(el.game, FEN_SEARCH_MAX_DEPTH, FEN_SEARCH_MAX_NODES);
         if (fen) return fen;
       }
       if (el.controller) {
-        const fen = findFenInObject(el.controller);
+        const fen = findFenInObject(el.controller, FEN_SEARCH_MAX_DEPTH, FEN_SEARCH_MAX_NODES);
         if (fen) return fen;
       }
-      const fen = findFenInObject(el);
+      const fen = findFenInObject(el, FEN_SEARCH_MAX_DEPTH, FEN_SEARCH_MAX_NODES);
       if (fen) return fen;
     } catch {}
 
     // ── Method 2: attribute "fen" on the element itself ──────────
     for (const attr of ['fen', 'data-fen']) {
-      const attrFen = normalizeFen(el.getAttribute(attr), { turn: inferredTurn });
+      const attrFen = normalizeFen(el.getAttribute(attr), { turn: turnHint });
       if (attrFen) return attrFen;
     }
   }
@@ -592,10 +662,9 @@ function fenFromPieces() {
 
   const board = Array.from({ length: 8 }, () => Array(8).fill(null));
 
-  // Detect board flip: if the player is black, board is flipped
-  const flipped = !!document.querySelector(
-    '[class*="board-flipped"], [flipped], .flipped-board'
-  ) || (document.querySelector('chess-board') || {}).flipped === true;
+  // Detect board flip using the same unified function used everywhere else
+  const boardEl = document.querySelector('chess-board, wc-chess-board');
+  const flipped = boardEl ? isBoardFlipped(boardEl) : false;
 
   for (const el of pieceEls) {
     const classes = Array.from(el.classList);
@@ -773,44 +842,89 @@ function getBoardElement() {
   return null;
 }
 
-function isBoardFlipped(boardEl = getBoardElement()) {
-  if (!boardEl) return false;
+// Single source-of-truth for board orientation.
+// Returns 'b' (playing as black = board flipped), 'w' (playing as white), or null if unknown.
+// NEVER calls getPlayerSide() to avoid circular dependency.
+function _detectOrientationColor(boardEl) {
+  if (!boardEl) return null;
 
-  const orientation = (
+  // ── 1. HTML attribute (most explicit — chess.com sets orientation="black" for live games) ──
+  const orientAttr = (
     boardEl.getAttribute?.('orientation') ||
     boardEl.getAttribute?.('data-orientation') ||
-    boardEl.dataset?.orientation ||
-    ''
+    boardEl.dataset?.orientation || ''
   ).toLowerCase();
-  if (orientation === 'black' || orientation === 'b') return true;
-  if (orientation === 'white' || orientation === 'w') return false;
+  if (orientAttr === 'black' || orientAttr === 'b') return 'b';
+  if (orientAttr === 'white' || orientAttr === 'w') return 'w';
 
-  return !!document.querySelector('[class*="board-flipped"], [flipped], .flipped-board') || boardEl.flipped === true;
+  // ── 2. JS property (wc-chess-board is a Web Component — the Lit property may differ from attribute) ──
+  try {
+    const orientProp = (typeof boardEl.orientation === 'string') ? boardEl.orientation.toLowerCase() : null;
+    if (orientProp === 'black' || orientProp === 'b') return 'b';
+    if (orientProp === 'white' || orientProp === 'w') return 'w';
+  } catch {}
+
+  // ── 3. Player/my color properties on the element or its game object ──
+  try {
+    for (const src of [boardEl, boardEl.game, boardEl.controller].filter(Boolean)) {
+      for (const key of ['myColor', 'playerColor', 'mySide', 'playerSide', 'userColor', 'localColor']) {
+        try {
+          const val = typeof src[key] === 'function' ? src[key]() : src[key];
+          const t = normalizeTurn(val);
+          if (t) return t;
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // ── 4. Boolean flipped property ──
+  try {
+    if (boardEl.flipped === true)  return 'b';
+    if (boardEl.flipped === false) return 'w';
+  } catch {}
+
+  // ── 5. flipped HTML attribute ──
+  const flippedAttr = boardEl.getAttribute?.('flipped');
+  if (flippedAttr === '' || flippedAttr === 'true') return 'b';
+  if (flippedAttr === 'false') return 'w';
+
+  // ── 6. CSS class ──
+  if (
+    boardEl.classList?.contains('board-flipped') ||
+    document.querySelector('.flipped-board, [class*="board-flipped"]')
+  ) return 'b';
+
+  // ── 7. Username position: if the logged-in user is at the TOP, they're playing black ──
+  const me = getLoggedInUsername();
+  if (me) {
+    for (const [panelCls, color] of [['top', 'b'], ['bottom', 'w']]) {
+      const panel = document.querySelector(
+        `[class*="player-${panelCls}"], [class*="board-player-${panelCls}"]`
+      );
+      if (!panel) continue;
+      const found = Array.from(
+        panel.querySelectorAll('[data-username], .user-username-component, .player-tagline-username')
+      ).some(el =>
+        (el.dataset?.username || el.textContent?.trim().split(/\s/)[0] || '').toLowerCase() === me
+      );
+      if (found) return color;
+    }
+  }
+
+  return null; // genuinely unknown
+}
+
+function isBoardFlipped(boardEl = getBoardElement()) {
+  const color = _detectOrientationColor(boardEl);
+  if (color === 'b') return true;
+  if (color === 'w') return false;
+  return false; // safe default: assume normal orientation
 }
 
 function getExplicitBoardFlipState(boardEl = getBoardElement()) {
-  if (!boardEl) return null;
-
-  const orientation = (
-    boardEl.getAttribute?.('orientation') ||
-    boardEl.getAttribute?.('data-orientation') ||
-    boardEl.dataset?.orientation ||
-    ''
-  ).toLowerCase();
-  if (orientation === 'black' || orientation === 'b') return true;
-  if (orientation === 'white' || orientation === 'w') return false;
-
-  const flippedAttr = boardEl.getAttribute?.('flipped');
-  if (flippedAttr === '' || flippedAttr === 'true') return true;
-  if (flippedAttr === 'false') return false;
-  if (boardEl.hasAttribute?.('flipped')) return true;
-
-  if (boardEl.flipped === true) return true;
-
-  if (boardEl.classList?.contains('board-flipped') || document.querySelector('.flipped-board, [class*="board-flipped"]')) {
-    return true;
-  }
-
+  const color = _detectOrientationColor(boardEl);
+  if (color === 'b') return true;
+  if (color === 'w') return false;
   return null;
 }
 
@@ -837,11 +951,29 @@ function ensureBestMoveOverlay() {
 
   const overlay = document.createElement('div');
   overlay.className = 'cse-bestmove-overlay';
+  // Two arrow groups: "my" (blue) and "opp" (red)
   overlay.innerHTML = `
-    <svg class="cse-bestmove-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
-      <line class="cse-bestmove-line" x1="0" y1="0" x2="0" y2="0"></line>
-      <circle class="cse-bestmove-start" cx="0" cy="0" r="0"></circle>
-      <polygon class="cse-bestmove-head" points="0,0 0,0 0,0"></polygon>
+    <svg class="cse-bestmove-svg" viewBox="0 0 800 800" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="cse-arrow-my"  markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+          <path d="M0,0 L4,2 L0,4 Z" fill="rgba(60,130,255,0.92)"/>
+        </marker>
+        <marker id="cse-arrow-opp" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+          <path d="M0,0 L4,2 L0,4 Z" fill="rgba(255,70,70,0.92)"/>
+        </marker>
+      </defs>
+      <!-- my arrow (blue) -->
+      <circle class="cse-arrow-start" id="cse-my-start" cx="0" cy="0" r="0"
+        fill="rgba(60,130,255,0.25)" stroke="rgba(60,130,255,0.9)" stroke-width="2"/>
+      <line id="cse-my-line" x1="0" y1="0" x2="0" y2="0"
+        stroke="rgba(60,130,255,0.88)" stroke-linecap="round"
+        marker-end="url(#cse-arrow-my)"/>
+      <!-- opponent arrow (red) -->
+      <circle class="cse-arrow-start" id="cse-opp-start" cx="0" cy="0" r="0"
+        fill="rgba(255,70,70,0.25)" stroke="rgba(255,70,70,0.9)" stroke-width="2"/>
+      <line id="cse-opp-line" x1="0" y1="0" x2="0" y2="0"
+        stroke="rgba(255,70,70,0.88)" stroke-linecap="round"
+        marker-end="url(#cse-arrow-opp)"/>
     </svg>
   `;
   document.body.appendChild(overlay);
@@ -858,33 +990,53 @@ function clearBestMoveOverlay() {
   hideBestMoveOverlay();
 }
 
-function getPlayerSide(boardEl = getBoardElement()) {
-  if (!boardEl) return null;
+// ── Who am I? ─────────────────────────────────────────────────
+function getLoggedInUsername() {
+  // 1. chess.com global objects
+  try {
+    const candidates = [
+      window.user?.username, window.user?.name,
+      window.settings?.username, window.chesscom?.user?.username,
+      window.GLOBALS?.user?.username
+    ];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.length > 1) return c.toLowerCase();
+    }
+  } catch {}
 
-  const explicitFlip = getExplicitBoardFlipState(boardEl);
-  if (explicitFlip === true) return 'b';
-  if (explicitFlip === false) return 'w';
+  // 2. Meta/data attribute marked as self
+  for (const sel of ['meta[name="user"]', '[data-username][data-is-self]']) {
+    const el = document.querySelector(sel);
+    if (el) {
+      const u = el.getAttribute('content') || el.getAttribute('data-username');
+      if (u) return u.toLowerCase();
+    }
+  }
+
+  // 3. Nav profile link  /member/Username  or  /profile/Username
+  for (const a of document.querySelectorAll('a[href*="/member/"], a[href*="/profile/"]')) {
+    const m = a.href.match(/\/(member|profile)\/([^/?#]+)/i);
+    if (m && m[2].length > 1) return m[2].toLowerCase();
+  }
 
   return null;
 }
 
-function shouldDisplayBestMoveArrow(boardEl = getBoardElement(), fen = lastEvalFen) {
-  if (!boardEl || !fen) return true;
+// Returns 'w' or 'b' (the side the local player is playing), or null.
+function getPlayerSide(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
 
-  const fenTurn = normalizeTurn(fen.split(' ')[1]);
-  const orientation = (
-    boardEl.getAttribute?.('orientation') ||
-    boardEl.getAttribute?.('data-orientation') ||
-    boardEl.dataset?.orientation ||
-    ''
-  ).toLowerCase();
-  if (orientation === 'white' || orientation === 'w') return 'w';
-  if (orientation === 'black' || orientation === 'b') return 'b';
+  // A/A2/B/C/D: use the shared orientation detector (checks attributes, JS props, username pos, etc.)
+  const color = _detectOrientationColor(boardEl);
+  if (color) return color;
 
+  // Last resort: fallback to isBoardFlipped (no circular dep since _detectOrientationColor is the shared core)
   return isBoardFlipped(boardEl) ? 'b' : 'w';
 }
 
 function shouldDisplayBestMoveArrow(boardEl = getBoardElement()) {
+  // Show arrow only when it is the player's turn to move.
+  // If we cannot determine the player's side, always show.
   if (!boardEl || !lastEvalFen) return true;
 
   const fenTurn = normalizeTurn(lastEvalFen.split(' ')[1]);
@@ -893,72 +1045,78 @@ function shouldDisplayBestMoveArrow(boardEl = getBoardElement()) {
   return fenTurn === playerSide;
 }
 
+function drawArrow(svg, lineId, startId, x1, y1, x2, y2, cell) {
+  const line  = svg.querySelector('#' + lineId);
+  const circ  = svg.querySelector('#' + startId);
+  if (!line || !circ) return;
+
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  const pad    = cell * 0.14;
+  const lw     = Math.max(3, cell * 0.11);
+  const mkSize = lw * 2.5;        // marker scales with line width
+  const r      = Math.max(3, cell * 0.11);
+
+  // Shorten end so the line stops before the marker
+  const x1p = x1 + ux * pad;
+  const y1p = y1 + uy * pad;
+  const x2p = x2 - ux * (mkSize * 0.9);
+  const y2p = y2 - uy * (mkSize * 0.9);
+
+  line.setAttribute('x1', x1p); line.setAttribute('y1', y1p);
+  line.setAttribute('x2', x2p); line.setAttribute('y2', y2p);
+  line.setAttribute('stroke-width', String(lw));
+  line.setAttribute('marker-end', line.getAttribute('marker-end')); // keep marker
+  circ.setAttribute('cx', x1); circ.setAttribute('cy', y1);
+  circ.setAttribute('r',  r);
+}
+
+function hideArrow(svg, lineId, startId) {
+  const line = svg.querySelector('#' + lineId);
+  const circ = svg.querySelector('#' + startId);
+  if (line) { line.setAttribute('x1', 0); line.setAttribute('y1', 0);
+               line.setAttribute('x2', 0); line.setAttribute('y2', 0); }
+  if (circ) circ.setAttribute('r', 0);
+}
+
 function syncBestMoveOverlay() {
   if (!arrowsEnabled || !currentBestMove) return hideBestMoveOverlay();
 
   const boardEl = getBoardElement();
   if (!boardEl) return hideBestMoveOverlay();
-  if (!shouldDisplayBestMoveArrow(boardEl, lastEvalFen)) return hideBestMoveOverlay();
-  if (!shouldDisplayBestMoveArrow(boardEl)) return hideBestMoveOverlay();
 
   const rect = boardEl.getBoundingClientRect();
   if (rect.width < 40 || rect.height < 40) return hideBestMoveOverlay();
 
+  // Only show arrow when it is MY turn to move
+  const playerSide = getPlayerSide(boardEl);
+  const fenTurn    = lastEvalFen ? normalizeTurn(lastEvalFen.split(' ')[1]) : null;
+  const isMyTurn   = fenTurn && playerSide ? fenTurn === playerSide : false;
+  if (!isMyTurn) return hideBestMoveOverlay();
+
   const from = currentBestMove.slice(0, 2);
-  const to = currentBestMove.slice(2, 4);
-  const flipped = isBoardFlipped(boardEl);
-  const start = squareToViewportPoint(from, rect, flipped);
-  const end = squareToViewportPoint(to, rect, flipped);
-  if (!start || !end) return hideBestMoveOverlay();
+  const to   = currentBestMove.slice(2, 4);
+  if (!/^[a-h][1-8]$/.test(from) || !/^[a-h][1-8]$/.test(to)) return hideBestMoveOverlay();
+
+  const flipped  = isBoardFlipped(boardEl);
+  const startPt  = squareToViewportPoint(from, rect, flipped);
+  const endPt    = squareToViewportPoint(to,   rect, flipped);
+  if (!startPt || !endPt) return hideBestMoveOverlay();
 
   const overlay = ensureBestMoveOverlay();
-  const svg = overlay.querySelector('.cse-bestmove-svg');
-  const line = overlay.querySelector('.cse-bestmove-line');
-  const startCircle = overlay.querySelector('.cse-bestmove-start');
-  const head = overlay.querySelector('.cse-bestmove-head');
+  const svg     = overlay.querySelector('.cse-bestmove-svg');
 
-  overlay.style.left = rect.left + 'px';
-  overlay.style.top = rect.top + 'px';
-  overlay.style.width = rect.width + 'px';
-  overlay.style.height = rect.height + 'px';
+  overlay.style.left   = '0';
+  overlay.style.top    = '0';
+  overlay.style.width  = window.innerWidth  + 'px';
+  overlay.style.height = window.innerHeight + 'px';
+  svg.setAttribute('viewBox', `0 0 ${window.innerWidth} ${window.innerHeight}`);
 
-  const x1 = start.x - rect.left;
-  const y1 = start.y - rect.top;
-  const x2 = end.x - rect.left;
-  const y2 = end.y - rect.top;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const length = Math.hypot(dx, dy) || 1;
-  const ux = dx / length;
-  const uy = dy / length;
-  const padding = Math.max(8, start.cell * 0.22);
-  const x1p = x1 + ux * padding;
-  const y1p = y1 + uy * padding;
-  const x2p = x2 - ux * padding;
-  const y2p = y2 - uy * padding;
-  const radius = Math.max(3, start.cell * 0.18);
-  const lineWidth = Math.max(6, start.cell * 0.26);
-  const headLength = Math.max(10, start.cell * 0.38);
-  const headWidth = Math.max(8, start.cell * 0.2);
-  const baseX = x2 - ux * headLength;
-  const baseY = y2 - uy * headLength;
-  const perpX = -uy;
-  const perpY = ux;
-  const leftX = baseX + perpX * headWidth;
-  const leftY = baseY + perpY * headWidth;
-  const rightX = baseX - perpX * headWidth;
-  const rightY = baseY - perpY * headWidth;
-
-  svg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
-  line.setAttribute('stroke-width', String(lineWidth));
-  line.setAttribute('x1', x1p);
-  line.setAttribute('y1', y1p);
-  line.setAttribute('x2', x2p);
-  line.setAttribute('y2', y2p);
-  startCircle.setAttribute('cx', x1);
-  startCircle.setAttribute('cy', y1);
-  startCircle.setAttribute('r', radius);
-  head.setAttribute('points', `${x2},${y2} ${leftX},${leftY} ${rightX},${rightY}`);
+  // Always blue — it's always MY move when we reach this point
+  drawArrow(svg, 'cse-my-line', 'cse-my-start',
+            startPt.x, startPt.y, endPt.x, endPt.y, startPt.cell);
+  hideArrow(svg, 'cse-opp-line', 'cse-opp-start');
 
   overlay.classList.add('cse-bestmove-visible');
 }
@@ -1094,25 +1252,13 @@ async function tickEvalBar() {
     evalRequestSeq++;
     lastEvalFen = null;
     bar.querySelector('[data-cse-part="score"]').textContent = '?';
-    lastEvalFen = null;
-    bar.querySelector('#cse-eval-score').textContent = '?';
     bar.title = 'Posizione non trovata sulla board';
     hideBestMoveOverlay();
     return;
   }
 
-  const boardEl = getBoardElement();
-  if (boardEl && !shouldDisplayBestMoveArrow(boardEl, fen)) {
-    evalRequestSeq++;
-    lastEvalFen = fen;
-    bar.querySelector('[data-cse-part="score"]').textContent = '⏸';
-    bar.querySelector('[data-cse-part="score"]').className = 'cse-eval-score';
-    bar.title = 'In attesa del tuo turno';
-    clearBestMoveOverlay();
-    return;
-  }
-
   if (fen === lastEvalFen) {
+    // Position unchanged — just keep overlay in sync (board may have scrolled/resized)
     syncBestMoveOverlay();
     return;
   }
@@ -1120,13 +1266,13 @@ async function tickEvalBar() {
   const requestSeq = ++evalRequestSeq;
   bar.title = '';
 
-  // Show "calculating" state immediately
   const scoreEl = bar.querySelector('[data-cse-part="score"]');
   scoreEl.textContent = '…';
   scoreEl.className = 'cse-eval-score cse-eval-thinking';
 
   const result = await fetchEval(fen);
   if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
+
   updateEvalBarDisplay(result);
 }
 
