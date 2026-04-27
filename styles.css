@@ -553,6 +553,53 @@
   align-content: start;
 }
 
+.cse-mc-settings-card {
+  grid-column: 1 / -1;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 14px;
+  background: rgba(255,255,255,0.02);
+}
+
+.cse-mc-settings-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #c8e6c0;
+  margin-bottom: 10px;
+}
+
+.cse-mc-settings-check {
+  margin-bottom: 10px;
+}
+
+.cse-mc-settings-btn {
+  width: 100%;
+  border: 1px solid #3d8a4f;
+  background: #1f3a1f;
+  color: #d8f8df;
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cse-mc-settings-btn:hover {
+  background: #28552e;
+  border-color: #4aa060;
+}
+
+.cse-mc-settings-status {
+  margin-top: 10px;
+  color: #9ea6b0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.cse-mc-settings-status b {
+  color: #d0d6de;
+  font-weight: 700;
+}
+
 .cse-mc-card {
   position: relative;
   padding: 10px 10px 22px;

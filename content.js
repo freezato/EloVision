@@ -250,6 +250,12 @@ let lastEvalFen = null;
 let lastEvalMoveSourceFen = null;
 let currentBestMove = null;
 let lastEvalTopMoves = [];
+let stockfishAutoReloadEnabled = false;
+let stockfishFailureStreak = 0;
+let stockfishFailureSinceAt = 0;
+let stockfishLastSuccessAt = 0;
+let stockfishLastReloadAt = 0;
+let stockfishNoFenSinceAt = 0;
 let bestMoveOverlay = null;
 let evalToggleBtn = null;
 let toolsModal = null;
@@ -270,6 +276,10 @@ let suggestMoveDepth = 15; // depth for SuggestMove/Arrows (user configurable)
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
 const EVAL_CACHE_TTL = 12 * 1000;
+const PUZZLE_RUSH_STUCK_TIMEOUT_MS = 3000;
+const PUZZLE_RUSH_FALLBACK_DEPTH_MIN = 10;
+const PUZZLE_RUSH_FALLBACK_DEPTH_MAX = 15;
+const STOCKFISH_AUTO_RELOAD_INTERVAL_MS = 15 * 1000;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -304,6 +314,7 @@ function cseSaveState() {
       automoveFastInOpening,
       puzzleRushDepth,
       suggestMoveDepth,
+      stockfishAutoReloadEnabled,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -1707,29 +1718,164 @@ function fenFromPieces() {
 let evalAbortController = null;
 const evalCache = new Map();
 let evalRequestSeq = 0;
+let puzzleRushPositionStartedAt = 0;
+let puzzleRushPositionKey = null;
+let puzzleRushFallbackDepth = null;
 
-function getCachedEval(fen) {
-  const entry = evalCache.get(fen);
+function getEvalCacheKey(fen, depth) {
+  return `${depth}|${fen}`;
+}
+
+function getCachedEval(fen, depth) {
+  const entry = evalCache.get(getEvalCacheKey(fen, depth));
   if (!entry) return null;
   if (now() - entry.ts > EVAL_CACHE_TTL) {
-    evalCache.delete(fen);
+    evalCache.delete(getEvalCacheKey(fen, depth));
     return null;
   }
   return entry.value;
 }
 
-function setCachedEval(fen, value) {
-  evalCache.set(fen, { ts: now(), value });
+function setCachedEval(fen, depth, value) {
+  evalCache.set(getEvalCacheKey(fen, depth), { ts: now(), value });
 }
 
-function getEvalQueryDepth() {
-  if (isPuzzleContext() && isPuzzleRushEnabled) return Math.max(1, Math.min(30, puzzleRushDepth));
+function clearPuzzleRushDepthFallback() {
+  puzzleRushPositionStartedAt = 0;
+  puzzleRushPositionKey = null;
+  puzzleRushFallbackDepth = null;
+}
+
+function getPuzzleRushPositionKey(fen) {
+  return getFenBoardAndTurn(fen);
+}
+
+function randomIntInclusive(min, max) {
+  const lo = Math.ceil(min);
+  const hi = Math.floor(max);
+  return lo + Math.floor(Math.random() * (Math.max(0, hi - lo) + 1));
+}
+
+function updatePuzzleRushDepthFallback(fen) {
+  if (!isPuzzleRushEnabled || !isPuzzleContext()) {
+    clearPuzzleRushDepthFallback();
+    return false;
+  }
+
+  const key = getPuzzleRushPositionKey(fen);
+  if (!key) {
+    clearPuzzleRushDepthFallback();
+    return false;
+  }
+
+  if (puzzleRushPositionKey !== key) {
+    puzzleRushPositionKey = key;
+    puzzleRushPositionStartedAt = now();
+    puzzleRushFallbackDepth = null;
+    return false;
+  }
+
+  if (Number.isFinite(puzzleRushFallbackDepth)) return false;
+  if (now() - puzzleRushPositionStartedAt < PUZZLE_RUSH_STUCK_TIMEOUT_MS) return false;
+
+  puzzleRushFallbackDepth = randomIntInclusive(PUZZLE_RUSH_FALLBACK_DEPTH_MIN, PUZZLE_RUSH_FALLBACK_DEPTH_MAX);
+  automoveLog('puzzle-rush fallback depth activated', {
+    depth: puzzleRushFallbackDepth,
+    fen: key
+  });
+  return true;
+}
+
+function getEvalQueryDepth(fen = lastEvalFen) {
+  if (isPuzzleContext() && isPuzzleRushEnabled) {
+    const key = getPuzzleRushPositionKey(fen);
+    if (key && key === puzzleRushPositionKey && Number.isFinite(puzzleRushFallbackDepth)) {
+      return Math.max(1, Math.min(30, puzzleRushFallbackDepth));
+    }
+    return Math.max(1, Math.min(30, puzzleRushDepth));
+  }
   return Math.max(1, Math.min(15, suggestMoveDepth));
 }
 
+function isEvalProxyUrl(url) {
+  return /^https:\/\/(?:stockfish\.online|lichess\.org)\//i.test(String(url || ''));
+}
+
+function makeAbortError() {
+  const err = new Error('Aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+function withAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(makeAbortError());
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(makeAbortError());
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      value => { cleanup(); resolve(value); },
+      err => { cleanup(); reject(err); }
+    );
+  });
+}
+
+function fetchJsonViaBackground(url, { signal, headers } = {}) {
+  const runtime = chrome?.runtime;
+  if (!runtime?.id || typeof runtime.sendMessage !== 'function') {
+    return Promise.reject(new Error('runtime-not-available'));
+  }
+
+  const request = new Promise((resolve, reject) => {
+    runtime.sendMessage(
+      { type: 'cse-fetch-json', url, headers },
+      (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || 'runtime-sendMessage-failed'));
+          return;
+        }
+        if (!response || typeof response !== 'object') {
+          reject(new Error('empty-background-response'));
+          return;
+        }
+        resolve(response);
+      }
+    );
+  });
+
+  return withAbort(request, signal);
+}
+
+async function fetchJsonWithStatus(url, { signal, headers } = {}) {
+  if (isEvalProxyUrl(url)) {
+    try {
+      return await fetchJsonViaBackground(url, { signal, headers });
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+    }
+  }
+
+  const res = await fetch(url, { signal, headers });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {}
+  return { ok: res.ok, status: res.status, data };
+}
+
 async function fetchEval(fen) {
-  const cached = getCachedEval(fen);
-  if (cached) return cached;
+  const queryDepth = getEvalQueryDepth(fen);
+  const cached = getCachedEval(fen, queryDepth);
+  if (cached) {
+    registerEvalSuccess();
+    return cached;
+  }
 
   // Cancel any in-flight request for a previous position
   if (evalAbortController) evalAbortController.abort();
@@ -1741,22 +1887,24 @@ async function fetchEval(fen) {
 
   // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
-    const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${getEvalQueryDepth()}`;
-    const res = await fetch(url, { signal });
+    const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${queryDepth}`;
+    const res = await fetchJsonWithStatus(url, { signal });
     if (res.ok) {
-      const data = await res.json();
+      const data = res.data;
       if (data.success) {
         const bestMove = extractUciMove(data.bestmove);
         if (data.mate !== null && data.mate !== undefined && data.mate !== 0) {
           const result = { cp: null, mate: turn === 'w' ? data.mate : -data.mate, bestMove, topMoves: normalizeTopMoves([bestMove]) };
-          setCachedEval(fen, result);
+          setCachedEval(fen, queryDepth, result);
+          registerEvalSuccess();
           return result;
         }
         const cpRaw = Math.round(parseFloat(data.evaluation) * 100);
         const cp = turn === 'w' ? cpRaw : -cpRaw;
         if (!isNaN(cp)) {
           const result = { cp, mate: null, bestMove, topMoves: normalizeTopMoves([bestMove]) };
-          setCachedEval(fen, result);
+          setCachedEval(fen, queryDepth, result);
+          registerEvalSuccess();
           return result;
         }
       }
@@ -1768,21 +1916,23 @@ async function fetchEval(fen) {
   // Fallback: Lichess cloud-eval (instant if cached, 404 if not)
   try {
     const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=3`;
-    const res = await fetch(url, { headers: { 'Accept': 'application/json' }, signal });
+    const res = await fetchJsonWithStatus(url, { headers: { 'Accept': 'application/json' }, signal });
     if (res.ok) {
-      const data = await res.json();
+      const data = res.data;
       const topMoves = normalizeTopMoves((data.pvs || []).map(pv => pv.moves));
       const pv = data.pvs && data.pvs[0];
       if (pv) {
         const bestMove = extractUciMove(pv.moves);
         if (pv.mate !== undefined) {
           const result = { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove, topMoves: normalizeTopMoves([bestMove, ...topMoves]) };
-          setCachedEval(fen, result);
+          setCachedEval(fen, queryDepth, result);
+          registerEvalSuccess();
           return result;
         }
         if (pv.cp  !== undefined) {
           const result = { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove, topMoves: normalizeTopMoves([bestMove, ...topMoves]) };
-          setCachedEval(fen, result);
+          setCachedEval(fen, queryDepth, result);
+          registerEvalSuccess();
           return result;
         }
       }
@@ -1791,6 +1941,7 @@ async function fetchEval(fen) {
     if (e.name === 'AbortError') return null;
   }
 
+  registerEvalFailure();
   return null;
 }
 
@@ -2237,7 +2388,7 @@ function applySavedGuiAndModuleState() {
     };
   }
 
-  if (saved.activeTab === 'ALL' || saved.activeTab === 'FAVORITE') {
+  if (saved.activeTab === 'ALL' || saved.activeTab === 'FAVORITE' || saved.activeTab === 'SETTINGS') {
     cseGuiState.activeTab = saved.activeTab;
   }
 
@@ -2259,6 +2410,7 @@ function applySavedGuiAndModuleState() {
     automoveFastInOpening = !!saved.settings.automoveFastInOpening;
     if (Number.isFinite(saved.settings.puzzleRushDepth)) puzzleRushDepth = Math.max(1, Math.min(30, Math.round(saved.settings.puzzleRushDepth)));
     if (Number.isFinite(saved.settings.suggestMoveDepth)) suggestMoveDepth = Math.max(1, Math.min(15, Math.round(saved.settings.suggestMoveDepth)));
+    stockfishAutoReloadEnabled = !!saved.settings.stockfishAutoReloadEnabled;
   }
 }
 
@@ -2282,11 +2434,68 @@ function isEvaluationEngineNeeded() {
   return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled);
 }
 
+function resetStockfishFailureTracking() {
+  stockfishFailureStreak = 0;
+  stockfishFailureSinceAt = 0;
+}
+
+function registerEvalSuccess() {
+  stockfishLastSuccessAt = now();
+  resetStockfishFailureTracking();
+}
+
+function registerEvalFailure() {
+  if (stockfishFailureStreak === 0) stockfishFailureSinceAt = now();
+  stockfishFailureStreak += 1;
+}
+
+function reloadStockfishConnection(reason = 'manual-ui', forceTick = true) {
+  if (evalAbortController) {
+    try { evalAbortController.abort(); } catch {}
+    evalAbortController = null;
+  }
+  evalCache.clear();
+  evalRequestSeq++;
+  clearAutomoveSchedule();
+  clearPuzzleRushDepthFallback();
+  lastEvalFen = null;
+  lastEvalMoveSourceFen = null;
+  currentBestMove = null;
+  lastEvalTopMoves = [];
+  stockfishNoFenSinceAt = 0;
+  hideBestMoveOverlay();
+  resetStockfishFailureTracking();
+  stockfishLastReloadAt = now();
+  automoveLog('stockfish reload', { reason });
+  if (forceTick) ensureEvalEngineState(true);
+}
+
+function maybeAutoReloadStockfish() {
+  if (!stockfishAutoReloadEnabled) return;
+  if (!isEvaluationEngineNeeded()) return;
+  const failStuck = !!(stockfishFailureStreak && stockfishFailureSinceAt && (now() - stockfishFailureSinceAt >= STOCKFISH_AUTO_RELOAD_INTERVAL_MS));
+  const noFenStuck = !!(stockfishNoFenSinceAt && (now() - stockfishNoFenSinceAt >= STOCKFISH_AUTO_RELOAD_INTERVAL_MS));
+  if (!failStuck && !noFenStuck) return;
+  if (stockfishLastReloadAt && now() - stockfishLastReloadAt < STOCKFISH_AUTO_RELOAD_INTERVAL_MS) return;
+  reloadStockfishConnection(failStuck ? 'auto-watchdog-fail' : 'auto-watchdog-no-fen', false);
+}
+
+function formatAgo(ts) {
+  if (!ts || !Number.isFinite(ts)) return 'never';
+  const sec = Math.max(0, Math.floor((now() - ts) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  const rem = sec % 60;
+  return `${min}m ${rem}s ago`;
+}
+
 function stopEvalEngine() {
   if (evalUpdateInterval) {
     clearInterval(evalUpdateInterval);
     evalUpdateInterval = null;
   }
+  resetStockfishFailureTracking();
+  clearPuzzleRushDepthFallback();
   evalRequestSeq++;
   clearAutomoveSchedule();
   lastEvalFen = null;
@@ -2381,14 +2590,15 @@ function cseRenderGui() {
   if (!modal) return;
   const tab = cseGuiState.activeTab;
 
-  const mods = [
+  const allMods = [
     { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled, hasSettings: true },
     { id: 'PuzzleRush', label: 'Puzzle Rush', active: isPuzzleRushEnabled, hasSettings: true },
     { id: 'AutoPlay', label: 'AutoPlay', active: isAutoPlayEnabled, hasSettings: false },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
-  ].filter(m => tab === 'ALL' || (tab === 'FAVORITE' && cseGuiState.favorites[m.id]));
+  ];
+  const mods = allMods.filter(m => tab === 'ALL' || (tab === 'FAVORITE' && cseGuiState.favorites[m.id]));
 
   modal.querySelectorAll('.cse-mc-tab').forEach(t => {
     const active = t.dataset.tab === tab;
@@ -2399,6 +2609,55 @@ function cseRenderGui() {
 
   const grid = modal.querySelector('#cse-mc-grid');
   grid.innerHTML = '';
+
+  if (tab === 'SETTINGS') {
+    cseGuiState.openSettings = null;
+    const ov = modal.querySelector('#cse-mc-settings-overlay');
+    if (ov) ov.style.display = 'none';
+
+    const failureFor = stockfishFailureSinceAt ? formatAgo(stockfishFailureSinceAt) : '-';
+    const noFenFor = stockfishNoFenSinceAt ? formatAgo(stockfishNoFenSinceAt) : '-';
+    const lastSuccess = formatAgo(stockfishLastSuccessAt);
+    const lastReload = formatAgo(stockfishLastReloadAt);
+
+    grid.innerHTML = `
+      <div class="cse-mc-settings-card">
+        <div class="cse-mc-settings-title">Stockfish</div>
+        <label class="cse-mc-check cse-mc-settings-check">
+          <input type="checkbox" id="cse-stockfish-auto-reload" ${stockfishAutoReloadEnabled ? 'checked' : ''}>
+          <span>Auto reload every 15s when eval is stuck</span>
+        </label>
+        <button class="cse-mc-settings-btn" id="cse-stockfish-reload-now">Reload Stockfish now</button>
+        <div class="cse-mc-settings-status">
+          <div>Failure streak: <b>${stockfishFailureStreak}</b></div>
+          <div>Failing for: <b>${failureFor}</b></div>
+          <div>No position for: <b>${noFenFor}</b></div>
+          <div>Last eval success: <b>${lastSuccess}</b></div>
+          <div>Last reload: <b>${lastReload}</b></div>
+        </div>
+      </div>
+    `;
+
+    const autoCb = grid.querySelector('#cse-stockfish-auto-reload');
+    const reloadBtn = grid.querySelector('#cse-stockfish-reload-now');
+    if (autoCb) {
+      autoCb.addEventListener('change', () => {
+        stockfishAutoReloadEnabled = !!autoCb.checked;
+        cseSaveState();
+        cseRenderGui();
+      });
+    }
+    if (reloadBtn) {
+      reloadBtn.addEventListener('click', () => {
+        reloadStockfishConnection('manual-ui', true);
+        cseSaveState();
+        cseRenderGui();
+      });
+    }
+
+    syncGuiHudPanel();
+    return;
+  }
 
   if (mods.length === 0) {
     grid.innerHTML = '<div style="grid-column:1/-1;padding:30px;text-align:center;color:#666;font-size:12px;">No modules in this category</div>';
@@ -2447,6 +2706,7 @@ function cseRenderGui() {
         }
       } else if (mod.id === 'PuzzleRush') {
         isPuzzleRushEnabled = !isPuzzleRushEnabled;
+        clearPuzzleRushDepthFallback();
         if (!isPuzzleRushEnabled) {
           clearAutomoveSchedule();
           if (!isAutomoveEnabled) stopAutomoveUiTicker();
@@ -2696,6 +2956,7 @@ function cseRenderSettingsPanel(modId) {
     prDepth.addEventListener('input', () => {
       puzzleRushDepth = parseInt(prDepth.value, 10);
       ov.querySelector('#cse-sp-pr-depth-val').textContent = puzzleRushDepth;
+      clearPuzzleRushDepthFallback();
       evalCache.clear();
       lastEvalFen = null;
       cseSaveState();
@@ -2805,6 +3066,7 @@ function createToolsGui() {
     <div class="cse-mc-tabs">
       <button class="cse-mc-tab" data-tab="ALL" style="color:#fff;border-bottom:2px solid #4a9e5c;font-weight:600;">ALL</button>
       <button class="cse-mc-tab" data-tab="FAVORITE" style="color:#666;border-bottom:2px solid transparent;">FAVORITE</button>
+      <button class="cse-mc-tab" data-tab="SETTINGS" style="color:#666;border-bottom:2px solid transparent;">SETTINGS</button>
       <div style="flex:1"></div>
     </div>
     <div class="cse-mc-grid" id="cse-mc-grid"></div>
@@ -2906,6 +3168,8 @@ async function tickEvalBar() {
   const fen = getFenFromPage();
 
   if (!fen) {
+    if (!stockfishNoFenSinceAt) stockfishNoFenSinceAt = now();
+    clearPuzzleRushDepthFallback();
     evalRequestSeq++;
     lastEvalFen = null;
     lastEvalMoveSourceFen = null;
@@ -2918,14 +3182,26 @@ async function tickEvalBar() {
     }
     hideBestMoveOverlay();
     clearAutomoveSchedule();
+    maybeAutoReloadStockfish();
+    return;
+  }
+  stockfishNoFenSinceAt = 0;
+
+  const fallbackDepthActivated = updatePuzzleRushDepthFallback(fen);
+
+  if (fen === lastEvalFen && !fallbackDepthActivated) {
+    const hasEvalMoveForFen = !!(lastEvalMoveSourceFen === lastEvalFen && extractUciMove(currentBestMove));
+    if (arrowsEnabled) syncBestMoveOverlay();
+    else hideBestMoveOverlay();
+    if (hasEvalMoveForFen && (isAutomoveEnabled || isPuzzleRushEnabled)) performAutomove();
+    maybeAutoReloadStockfish();
     return;
   }
 
-  if (fen === lastEvalFen) {
-    if (arrowsEnabled) syncBestMoveOverlay();
-    else hideBestMoveOverlay();
-    if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
-    return;
+  if (fallbackDepthActivated) {
+    lastEvalMoveSourceFen = null;
+    currentBestMove = null;
+    lastEvalTopMoves = [];
   }
 
   lastEvalFen = fen;
@@ -2944,8 +3220,17 @@ async function tickEvalBar() {
   if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
 
   updateEvalBarDisplay(result);
+  if (!result) {
+    // Eval transient error (API down/timeout/404 cache miss): retry same FEN on next tick.
+    // Resetting lastEvalFen here avoids getting stuck on "?" forever for a position.
+    lastEvalFen = null;
+    if (!arrowsEnabled) hideBestMoveOverlay();
+    maybeAutoReloadStockfish();
+    return;
+  }
   if (!arrowsEnabled) hideBestMoveOverlay();
   if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
+  maybeAutoReloadStockfish();
 }
 
 function toggleToolsGui() {
@@ -3070,7 +3355,3 @@ new MutationObserver(() => {
     setTimeout(scanAndInject, 1000);
   }
 }).observe(document, { subtree: true, childList: true });
-
-
-
-

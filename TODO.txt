@@ -1,0 +1,5 @@
+Rendere la legit mode di AutoMove molto piu' legit e umana;
+[DONE] Sistemare Puzzle Rush in modo che se entro 3 secondi non fa una mossa imposta il depth in un intervallo random tra 10 e 15;
+Aumentare il depth massimo da 15 a 30;
+Sistemare autoplay non funzionante + aggiungere opzione "Accetta rivincite se richieste";
+Aggiungere Cheater Finder;
