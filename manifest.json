@@ -7,7 +7,6 @@
   "host_permissions": [
     "https://www.chess.com/*",
     "https://api.chess.com/*",
-    "https://lichess.org/*",
     "https://stockfish.online/*"
   ],
   "background": {

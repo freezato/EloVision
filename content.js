@@ -1,5 +1,5 @@
 // Chess.com Opponent Stats Extension
-// Fetches opponent stats from chess.com public API
+// Updated: legit mode improvements, ETA timer fix, forced premoves only
 
 const CACHE = {};
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -246,10 +246,13 @@ async function loadStatsForUser(username) {
 
 let evalBarPanel = null;
 let evalUpdateInterval = null;
+let evalTickIntervalMs = 0;
 let lastEvalFen = null;
 let lastEvalMoveSourceFen = null;
 let currentBestMove = null;
 let lastEvalTopMoves = [];
+let lastEvalPvLines = [];
+let lastEvalMate = null;
 let stockfishAutoReloadEnabled = false;
 let stockfishFailureStreak = 0;
 let stockfishFailureSinceAt = 0;
@@ -269,6 +272,7 @@ let automoveDelayMin = 1;  // seconds (user configurable)
 let automoveDelayMax = 5;  // seconds (user configurable)
 let automoveFastWhenLowTime = false; // speed up when own clock < 30s
 let automoveFastInOpening = false;   // speed up during first 8 full moves
+let automoveUseSmartPremoves = false; // queue premoves in tactical/forced spots
 let isPuzzleRushEnabled = false;
 let isAutoPlayEnabled = false;
 let puzzleRushDepth = 20;
@@ -279,7 +283,10 @@ const EVAL_CACHE_TTL = 12 * 1000;
 const PUZZLE_RUSH_STUCK_TIMEOUT_MS = 3000;
 const PUZZLE_RUSH_FALLBACK_DEPTH_MIN = 10;
 const PUZZLE_RUSH_FALLBACK_DEPTH_MAX = 15;
-const STOCKFISH_AUTO_RELOAD_INTERVAL_MS = 15 * 1000;
+const STOCKFISH_AUTO_RELOAD_INTERVAL_MS = 10 * 1000;
+const EVAL_TICK_FAST_MS = 180;
+const EVAL_TICK_NORMAL_MS = 1000;
+const STOCKFISH_TIMEOUT_FAST_MS = 780;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -312,9 +319,11 @@ function cseSaveState() {
       automoveDelayMax,
       automoveFastWhenLowTime,
       automoveFastInOpening,
+      automoveUseSmartPremoves,
       puzzleRushDepth,
       suggestMoveDepth,
       stockfishAutoReloadEnabled,
+      autoPlayAcceptRematch,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -464,6 +473,12 @@ function getReliableFullmoveNumber() {
     if (Number.isInteger(fullmove) && fullmove > 0) return fullmove;
   }
   return null;
+}
+
+function getFullmoveNumberFromMoveListOnly() {
+  const plyCount = getPlyCountFromMoveList();
+  if (!Number.isInteger(plyCount) || plyCount < 0) return null;
+  return Math.max(1, Math.floor(plyCount / 2) + 1);
 }
 
 function findTurnInObject(root, maxDepth = 2, maxNodes = 120) {
@@ -656,14 +671,32 @@ let automoveTargetFen = null;
 let automoveScheduledProfile = null; // 'automove' | 'puzzleRush'
 let automoveBlockedKey = null;
 let automoveBlockedUntil = 0;
+let premoveTimeout = null;
+let premoveScheduledAt = 0;
+let premoveDelayMs = 0;
+let premovePlannedMove = null;
+let premoveTargetFen = null;
+let premoveLastAttemptKey = null;
+let premoveBlockedUntil = 0;
 let autoPlayTickInterval = null;
 let autoPlayTimeout = null;
 let autoPlayScheduledAt = 0;
 let autoPlayDelayMs = 0;
 let autoPlayHandledToken = null;
-const AUTOMOVE_DEBUG = true;
+let autoPlayAcceptRematch = true;
+let autoPlayGameOverToken = null;
+let autoPlayGameOverSeenAt = 0;
+let autoPlayGameOverNode = null;
+const CSE_LOG_MAX_ENTRIES = 400;
+const CSE_LOG_MAX_RENDER_LINES = 160;
+let cseLogCheckerEnabled = false;
+let cseLogEntries = [];
+let cseLogSeq = 0;
+let cseLogPanel = null;
+let cseLogRenderQueued = false;
 let lastLoggedPlayerSide = null;
 let playerSideCache = { side: null, ts: 0 };
+let legitInaccuracyStreak = 0;
 
 function isSameFenBoardAndTurn(fenA, fenB) {
   if (!fenA || !fenB) return true;
@@ -721,18 +754,266 @@ function isMovePlayableNow(move, evalFen = lastEvalFen) {
   return isMoveConsistentWithFen(uci, boardFen);
 }
 
+function splitUciMove(move) {
+  const uci = extractUciMove(move);
+  if (!uci || uci.length < 4) return null;
+  const from = uci.slice(0, 2);
+  const to = uci.slice(2, 4);
+  if (!/^[a-h][1-8]$/.test(from) || !/^[a-h][1-8]$/.test(to)) return null;
+  return { uci, from, to, promotion: uci.length >= 5 ? uci[4].toLowerCase() : null };
+}
+
+function getPieceColor(piece) {
+  if (typeof piece !== 'string' || !piece) return null;
+  return /[A-Z]/.test(piece) ? 'w' : 'b';
+}
+
+function squareToBoardIndex(square) {
+  if (!/^[a-h][1-8]$/i.test(square)) return null;
+  const col = square.toLowerCase().charCodeAt(0) - 97;
+  const rank = parseInt(square[1], 10);
+  const row = 8 - rank;
+  if (row < 0 || row > 7 || col < 0 || col > 7) return null;
+  return { row, col };
+}
+
+function cloneFenBoard(board) {
+  if (!Array.isArray(board) || board.length !== 8) return null;
+  return board.map(r => Array.isArray(r) ? r.slice() : []);
+}
+
+function setPieceAtFenSquare(board, square, piece) {
+  const idx = squareToBoardIndex(square);
+  if (!idx || !Array.isArray(board) || !board[idx.row]) return false;
+  board[idx.row][idx.col] = piece || null;
+  return true;
+}
+
+function applyPseudoUciMoveOnBoard(board, move) {
+  const mv = splitUciMove(move);
+  if (!mv || !Array.isArray(board)) return null;
+  const fromPiece = pieceAtFenSquare(board, mv.from);
+  if (!fromPiece) return null;
+
+  const fromIdx = squareToBoardIndex(mv.from);
+  const toIdx = squareToBoardIndex(mv.to);
+  if (!fromIdx || !toIdx) return null;
+
+  const moverColor = getPieceColor(fromPiece);
+  let capturedPiece = pieceAtFenSquare(board, mv.to);
+  let capturedSquare = mv.to;
+
+  // En-passant style capture (best-effort pseudo simulation).
+  if (!capturedPiece && /^[pP]$/.test(fromPiece) && fromIdx.col !== toIdx.col) {
+    const epRow = moverColor === 'w' ? toIdx.row + 1 : toIdx.row - 1;
+    if (epRow >= 0 && epRow <= 7) {
+      capturedPiece = board[epRow]?.[toIdx.col] || null;
+      capturedSquare = String.fromCharCode(97 + toIdx.col) + (8 - epRow);
+      if (capturedPiece) board[epRow][toIdx.col] = null;
+    }
+  }
+
+  board[fromIdx.row][fromIdx.col] = null;
+
+  let placedPiece = fromPiece;
+  if (mv.promotion && /^[pP]$/.test(fromPiece)) {
+    const promo = mv.promotion.toLowerCase();
+    const map = { q: 'q', r: 'r', b: 'b', n: 'n' };
+    if (map[promo]) placedPiece = moverColor === 'w' ? map[promo].toUpperCase() : map[promo];
+  }
+  board[toIdx.row][toIdx.col] = placedPiece;
+
+  // Castle rook move (best-effort for king 2-square move).
+  if ((fromPiece === 'K' || fromPiece === 'k') && Math.abs(fromIdx.col - toIdx.col) === 2) {
+    if (toIdx.col === 6) {
+      const rookFrom = String.fromCharCode(97 + 7) + (8 - fromIdx.row);
+      const rookTo = String.fromCharCode(97 + 5) + (8 - fromIdx.row);
+      const rookPiece = pieceAtFenSquare(board, rookFrom);
+      if (rookPiece && getPieceColor(rookPiece) === moverColor) {
+        setPieceAtFenSquare(board, rookFrom, null);
+        setPieceAtFenSquare(board, rookTo, rookPiece);
+      }
+    } else if (toIdx.col === 2) {
+      const rookFrom = String.fromCharCode(97 + 0) + (8 - fromIdx.row);
+      const rookTo = String.fromCharCode(97 + 3) + (8 - fromIdx.row);
+      const rookPiece = pieceAtFenSquare(board, rookFrom);
+      if (rookPiece && getPieceColor(rookPiece) === moverColor) {
+        setPieceAtFenSquare(board, rookFrom, null);
+        setPieceAtFenSquare(board, rookTo, rookPiece);
+      }
+    }
+  }
+
+  return {
+    board,
+    capturedPiece: capturedPiece || null,
+    capturedSquare: capturedPiece ? capturedSquare : null,
+    move: mv.uci
+  };
+}
+
+function isCaptureMoveOnFen(move, fen) {
+  if (!move || !fen) return false;
+  const mv = splitUciMove(move);
+  const parts = String(fen).trim().split(/\s+/);
+  const board = expandFenBoard(parts[0] || '');
+  const turn = normalizeTurn(parts[1] || '');
+  if (!mv || !board || !turn) return false;
+
+  const fromPiece = pieceAtFenSquare(board, mv.from);
+  if (!fromPiece) return false;
+  const moverColor = getPieceColor(fromPiece);
+  if (moverColor !== turn) return false;
+
+  const toPiece = pieceAtFenSquare(board, mv.to);
+  if (toPiece && getPieceColor(toPiece) !== moverColor) return true;
+
+  // En-passant style capture check.
+  if (/^[pP]$/.test(fromPiece) && mv.from[0] !== mv.to[0]) {
+    const toIdx = squareToBoardIndex(mv.to);
+    if (toIdx) {
+      const epRow = moverColor === 'w' ? toIdx.row + 1 : toIdx.row - 1;
+      if (epRow >= 0 && epRow <= 7) {
+        const epPiece = board[epRow]?.[toIdx.col] || null;
+        if (epPiece && getPieceColor(epPiece) !== moverColor && /^[pP]$/.test(epPiece)) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function isMateForTurnSoon(fen, mateScore, maxPly = 5) {
+  if (!Number.isFinite(mateScore) || !fen) return false;
+  const turn = normalizeTurn(String(fen).trim().split(/\s+/)[1] || '');
+  if (!turn) return false;
+  const mateForTurn = (turn === 'w' && mateScore > 0) || (turn === 'b' && mateScore < 0);
+  return mateForTurn && Math.abs(mateScore) <= maxPly;
+}
+
+// ── Bypass delay solo per puzzle rush o matto forzato, NON per catture generiche ──
+function shouldBypassAutomoveDelay(profile, move, fen) {
+  if (!move || !fen) return false;
+  if (profile === 'puzzleRush') return true;
+  if (isMateForTurnSoon(fen, lastEvalMate, 5)) return true;
+  return false;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function cseFormatLogArg(arg) {
+  if (arg === null || arg === undefined) return String(arg);
+  if (typeof arg === 'string') return arg;
+  if (typeof arg === 'number' || typeof arg === 'boolean') return String(arg);
+  try {
+    return JSON.stringify(arg);
+  } catch {
+    return String(arg);
+  }
+}
+
+function csePushLog(category, args) {
+  if (!cseLogCheckerEnabled) return;
+  const msg = Array.isArray(args) ? args.map(cseFormatLogArg).join(' ') : cseFormatLogArg(args);
+  cseLogEntries.push({
+    id: ++cseLogSeq,
+    ts: now(),
+    cat: category || 'log',
+    msg
+  });
+  if (cseLogEntries.length > CSE_LOG_MAX_ENTRIES) {
+    cseLogEntries.splice(0, cseLogEntries.length - CSE_LOG_MAX_ENTRIES);
+  }
+  scheduleLogPanelRender();
+}
+
+function formatLogTime(ts) {
+  try {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('it-IT', { hour12: false });
+  } catch {
+    return '';
+  }
+}
+
+function renderLogPanel() {
+  cseLogRenderQueued = false;
+  if (!cseLogPanel?.isConnected) return;
+  const body = cseLogPanel.querySelector('[data-cse-log-body]');
+  if (!body) return;
+  const rows = cseLogEntries.slice(-CSE_LOG_MAX_RENDER_LINES).map(e => `[${formatLogTime(e.ts)}] [${e.cat}] ${e.msg}`);
+  body.textContent = rows.join('\n');
+  body.scrollTop = body.scrollHeight;
+}
+
+function scheduleLogPanelRender() {
+  if (!cseLogPanel?.isConnected) return;
+  if (cseLogRenderQueued) return;
+  cseLogRenderQueued = true;
+  requestAnimationFrame(renderLogPanel);
+}
+
+function closeLogPanel() {
+  if (cseLogPanel?.isConnected) cseLogPanel.remove();
+  cseLogPanel = null;
+  cseLogRenderQueued = false;
+}
+
+function clearLogEntries() {
+  cseLogEntries = [];
+  scheduleLogPanelRender();
+}
+
+function openLogPanel() {
+  if (cseLogPanel?.isConnected) {
+    scheduleLogPanelRender();
+    return cseLogPanel;
+  }
+  const panel = document.createElement('div');
+  panel.className = 'cse-log-checker';
+  panel.style.cssText = [
+    'position:fixed',
+    'right:18px',
+    'bottom:18px',
+    'width:420px',
+    'max-width:calc(100vw - 24px)',
+    'height:250px',
+    'z-index:999999',
+    'background:#111',
+    'color:#d8d8d8',
+    'border:1px solid #333',
+    'border-radius:8px',
+    'display:flex',
+    'flex-direction:column',
+    'overflow:hidden',
+    'box-shadow:0 12px 26px rgba(0,0,0,.45)',
+    'font-family:Consolas,Monaco,monospace',
+    'font-size:11px'
+  ].join(';');
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1b1b1b;border-bottom:1px solid #2f2f2f;">
+      <div style="font-weight:700;flex:1;">Logs Checker</div>
+      <button type="button" data-cse-log-clear style="height:22px;padding:0 8px;border:1px solid #444;border-radius:4px;background:#242424;color:#ddd;cursor:pointer;">Clear</button>
+      <button type="button" data-cse-log-close style="height:22px;padding:0 8px;border:1px solid #444;border-radius:4px;background:#242424;color:#ddd;cursor:pointer;">Close</button>
+    </div>
+    <pre data-cse-log-body style="margin:0;flex:1;overflow:auto;padding:8px 10px;white-space:pre-wrap;word-break:break-word;line-height:1.25;"></pre>
+  `;
+  panel.querySelector('[data-cse-log-close]')?.addEventListener('click', closeLogPanel);
+  panel.querySelector('[data-cse-log-clear]')?.addEventListener('click', clearLogEntries);
+  document.body.appendChild(panel);
+  cseLogPanel = panel;
+  scheduleLogPanelRender();
+  return panel;
+}
+
 function automoveLog(...args) {
-  if (!AUTOMOVE_DEBUG) return;
-  console.log('[ChessStats][AutoMove]', ...args);
+  csePushLog('AutoMove', args);
 }
 
 function autoPlayLog(...args) {
-  if (!AUTOMOVE_DEBUG) return;
-  console.log('[ChessStats][AutoPlay]', ...args);
+  csePushLog('AutoPlay', args);
 }
 
 function clearAutoPlaySchedule(resetHandledToken = false) {
@@ -742,7 +1023,12 @@ function clearAutoPlaySchedule(resetHandledToken = false) {
   }
   autoPlayScheduledAt = 0;
   autoPlayDelayMs = 0;
-  if (resetHandledToken) autoPlayHandledToken = null;
+  if (resetHandledToken) {
+    autoPlayHandledToken = null;
+    autoPlayGameOverToken = null;
+    autoPlayGameOverSeenAt = 0;
+    autoPlayGameOverNode = null;
+  }
 }
 
 function isElementRenderable(el) {
@@ -763,15 +1049,17 @@ function normalizeActionText(text) {
 function scoreAutoPlayActionText(text) {
   const t = normalizeActionText(text);
   if (!t) return 0;
-  if (/\b(play again|rematch)\b/.test(t)) return 120;
+  if (/\b(play again|rematch|rivincita|gioca ancora)\b/.test(t)) return autoPlayAcceptRematch ? 120 : 0;
+  if (/\b(accept rematch|accetta rivincita)\b/.test(t)) return autoPlayAcceptRematch ? 130 : 0;
   if (/\b(new game|new match|start new)\b/.test(t)) return 110;
+  if (/\b(nuova partita|nuova sfida)\b/.test(t)) return 108;
   if (/\bnew\b/.test(t) && /\b(min|sec|second|rapid|blitz|bullet|daily)\b/.test(t)) return 90;
   if (/\bplay\b/.test(t) && /\bnew\b/.test(t)) return 85;
   return 0;
 }
 
 function getAutoPlayActionCandidates() {
-  if (!isOnlineGameContext()) return [];
+  if (!isOnlineGameContext() && !isComputerGameContext()) return [];
   const scopeSelectors = [
     '[data-cy*="game-over"]',
     '[class*="game-over"]',
@@ -784,7 +1072,8 @@ function getAutoPlayActionCandidates() {
   const buttonSelectors = [
     'button',
     'a[role="button"]',
-    'div[role="button"]'
+    'div[role="button"]',
+    'span[role="button"]'
   ];
   const scopes = Array.from(new Set([
     ...scopeSelectors.flatMap(sel => Array.from(document.querySelectorAll(sel))),
@@ -816,8 +1105,9 @@ function getAutoPlayActionCandidates() {
 function getAutoPlayAction() {
   const candidate = getAutoPlayActionCandidates()[0];
   if (!candidate) return null;
-  const token = `${location.pathname}|${candidate.text}`;
-  return { ...candidate, token };
+  const token = `${location.pathname}|${candidate.text}|${candidate.score}`;
+  const onceToken = `${location.pathname}|${candidate.text}`;
+  return { ...candidate, token, onceToken };
 }
 
 function performAutoPlayTick() {
@@ -837,7 +1127,21 @@ function performAutoPlayTick() {
   if (autoPlayHandledToken === action.token) return;
   if (autoPlayTimeout) return;
 
-  autoPlayDelayMs = 2000 + Math.floor(Math.random() * 1001);
+  const gameOverToken = `${location.pathname}|${action.text}`;
+  if (autoPlayGameOverToken !== gameOverToken || autoPlayGameOverNode !== action.node) {
+    autoPlayGameOverToken = gameOverToken;
+    autoPlayGameOverNode = action.node;
+    autoPlayGameOverSeenAt = now();
+    updateAutomoveButtonState();
+    return;
+  }
+  if (!autoPlayGameOverSeenAt || (now() - autoPlayGameOverSeenAt) < 3000) {
+    updateAutomoveButtonState();
+    return;
+  }
+
+  // Gate già rispettato sopra (3s dalla comparsa end-screen): qui clicca quasi subito.
+  autoPlayDelayMs = 150 + Math.floor(Math.random() * 201);
   autoPlayScheduledAt = now();
   autoPlayLog('scheduled', { delayMs: autoPlayDelayMs, text: action.text });
   updateAutomoveButtonState();
@@ -853,10 +1157,14 @@ function performAutoPlayTick() {
       clearAutoPlaySchedule(true);
       return;
     }
-    if (autoPlayHandledToken === live.token) return;
+    if (autoPlayHandledToken === live.onceToken) {
+      clearAutoPlaySchedule(false);
+      return;
+    }
     try {
       live.node.click();
-      autoPlayHandledToken = live.token;
+      // Mark this end-screen action as already sent, so rematch is sent only once.
+      autoPlayHandledToken = live.onceToken;
       autoPlayLog('clicked', { text: live.text });
     } catch (err) {
       autoPlayLog('click failed', err);
@@ -887,13 +1195,13 @@ function logDetectedPlayerColor(boardEl = getBoardElement()) {
   if (!side) {
     if (lastLoggedPlayerSide !== 'unknown') {
       lastLoggedPlayerSide = 'unknown';
-      console.log('[ChessStats] colore: non rilevato');
+      csePushLog('System', ['colore: non rilevato']);
     }
     return;
   }
   if (side === lastLoggedPlayerSide) return;
   lastLoggedPlayerSide = side;
-  console.log(`[ChessStats] colore: ${side === 'b' ? 'nero' : 'bianco'}`);
+  csePushLog('System', [`colore: ${side === 'b' ? 'nero' : 'bianco'}`]);
 }
 
 function detectOrientationFromBoardCoordinates(boardEl) {
@@ -1008,34 +1316,326 @@ function isOnlineGameContext() {
   return !!(getBoardElement() && document.querySelector('.clock-component, .player-clock, [class*="clock-player-turn"]'));
 }
 
+function isComputerGameContext() {
+  if (isPuzzleContext()) return false;
+  const path = String(location.pathname || '').toLowerCase();
+  if (/\/play\/computer(\/|$)/.test(path)) return true;
+  if (/\/game\/computer(\/|$)/.test(path)) return true;
+  if (/\/play\/bots?(\/|$)/.test(path)) return true;
+  if (/\/bot(\/|$)/.test(path) && !!getBoardElement()) return true;
+
+  if (!getBoardElement()) return false;
+  return !!document.querySelector(
+    '[data-cy*="computer"], [class*="computer-player"], [class*="bot-player"], [class*="computer-avatar"], a[href*="/play/computer"]'
+  );
+}
+
 function getActiveMoveAssistProfile() {
   if (isPuzzleContext()) return isPuzzleRushEnabled ? 'puzzleRush' : null;
-  if (isOnlineGameContext()) return isAutomoveEnabled ? 'automove' : null;
+  if (isOnlineGameContext() || isComputerGameContext()) return isAutomoveEnabled ? 'automove' : null;
   return null;
 }
 
+function chooseLegitAutomoveMove(pool, fallback, playerSide, pvLines, ownClockSec, fullmove) {
+  if (!pool.length) return fallback;
+  if (pool.length === 1) return pool[0];
+
+  // Recupera valutazione migliore (centipawns dal lato del giocatore)
+  const bestMoveUci = extractUciMove(pool[0]);
+  let bestEval = null;
+  if (Array.isArray(pvLines) && pvLines.length) {
+    const mainPv = pvLines[0];
+    if (mainPv && mainPv.moves && mainPv.moves[0] === bestMoveUci) {
+      if (mainPv.mate !== null && mainPv.mate !== undefined) {
+        const mate = mainPv.mate;
+        bestEval = playerSide === 'w' ? mate : -mate;
+        bestEval = bestEval > 0 ? 10000 - bestEval : -10000 + bestEval;
+      } else if (mainPv.cp !== null && mainPv.cp !== undefined) {
+        bestEval = playerSide === 'w' ? mainPv.cp : -mainPv.cp;
+      }
+    }
+  }
+
+  // Margine di calo accettabile: quando sei in netto vantaggio, non buttare la partita.
+  let maxDrop = 115;
+  if (bestEval !== null && bestEval >= 500) maxDrop = 45;
+  else if (bestEval !== null && bestEval >= 300) maxDrop = 60;
+  else if (bestEval !== null && bestEval >= 150) maxDrop = 80;
+  else if (bestEval !== null && bestEval <= -300) maxDrop = 180;
+
+  // Costruisci mappa valutazioni per ogni mossa
+  const evalMap = new Map();
+  const mateMap = new Map();
+  if (Array.isArray(pvLines)) {
+    for (const pv of pvLines) {
+      const uci = pv.moves?.[0] ? extractUciMove(pv.moves[0]) : null;
+      if (!uci) continue;
+      if (Number.isFinite(pv.mate)) mateMap.set(uci, pv.mate);
+      let evalCp = null;
+      if (pv.mate !== null && pv.mate !== undefined) {
+        const m = pv.mate;
+        const pEval = playerSide === 'w' ? m : -m;
+        evalCp = pEval > 0 ? 10000 - pEval : -10000 + pEval;
+      } else if (pv.cp !== null && pv.cp !== undefined) {
+        evalCp = playerSide === 'w' ? pv.cp : -pv.cp;
+      }
+      if (evalCp !== null) evalMap.set(uci, evalCp);
+    }
+  }
+
+  // Filtra mosse che non peggiorano troppo
+  const filtered = pool.filter(uci => {
+    if (!evalMap.has(uci)) return true;
+    const evalMove = evalMap.get(uci);
+    if (bestEval === null) return true;
+    return (evalMove >= bestEval - maxDrop);
+  });
+
+  let candidates = filtered.length > 0 ? filtered : [pool[0]];
+
+  // Anti-draw: evita linee da patta quando esiste un'alternativa.
+  const nonDrawByMate = candidates.filter(uci => mateMap.get(uci) !== 0);
+  if (nonDrawByMate.length) candidates = nonDrawByMate;
+
+  const nonDrawByCp = candidates.filter(uci => {
+    if (!evalMap.has(uci)) return true;
+    const cp = evalMap.get(uci);
+    return Math.abs(cp) > 35;
+  });
+  if (nonDrawByCp.length) candidates = nonDrawByCp;
+
+  const bestCandidate = candidates[0];
+  if (candidates.length === 1) {
+    legitInaccuracyStreak = 0;
+    return bestCandidate;
+  }
+
+  // Errore umano occasionale ma controllato: mai in streak lunghi e mai quando il drop e' eccessivo.
+  const isWinningBig = Number.isFinite(bestEval) && bestEval >= 300;
+  const isWinning = Number.isFinite(bestEval) && bestEval >= 120;
+  const isOpening = Number.isInteger(fullmove) && fullmove <= 10;
+  const isLowTime = Number.isFinite(ownClockSec) && ownClockSec < 20;
+
+  // Se stiamo vincendo, evita completamente le "mistake move" per convertire senza patte.
+  if (isWinning) {
+    legitInaccuracyStreak = 0;
+    return bestCandidate;
+  }
+
+  let mistakeChance = 0.07;
+  if (isWinningBig) mistakeChance = 0.10;
+  if (isOpening) mistakeChance *= 0.65;
+  if (isLowTime) mistakeChance *= 0.55;
+  if (legitInaccuracyStreak >= 1) mistakeChance *= 0.35;
+
+  const canMakeMistake = candidates.length > 1 && Math.random() < mistakeChance;
+  if (!canMakeMistake) {
+    legitInaccuracyStreak = 0;
+    return bestCandidate;
+  }
+
+  const safeMistakes = candidates.slice(1);
+  if (!safeMistakes.length) {
+    legitInaccuracyStreak = 0;
+    return bestCandidate;
+  }
+
+  // Scegli prevalentemente 2a mossa; raramente 3a/4a se ancora dentro il maxDrop.
+  const pickRnd = Math.random();
+  const pickIdx = pickRnd < 0.86 ? 0 : (pickRnd < 0.98 ? 1 : 2);
+  const chosen = safeMistakes[Math.min(pickIdx, safeMistakes.length - 1)] || bestCandidate;
+  legitInaccuracyStreak = chosen === bestCandidate ? 0 : Math.min(3, legitInaccuracyStreak + 1);
+  return chosen;
+}
+
 function getAutomoveCandidateMove(profile = 'automove') {
-  if (lastEvalMoveSourceFen !== lastEvalFen) return null;
+  if (!lastEvalMoveSourceFen || !lastEvalFen || !isSameFenBoardAndTurn(lastEvalMoveSourceFen, lastEvalFen)) return null;
   const fallbackRaw = extractUciMove(currentBestMove);
   const fallback = isMovePlayableNow(fallbackRaw, lastEvalFen) ? fallbackRaw : null;
   if (profile === 'puzzleRush') return fallback;
-  if (automoveMode !== 'legit') return fallback;
-  const pool = Array.from(new Set((lastEvalTopMoves || [])
+  if (automoveMode !== 'legit') {
+    return fallback;
+  }
+
+  const pool = Array.from(new Set([fallbackRaw, ...(lastEvalTopMoves || [])]
     .map(extractUciMove)
     .filter(m => isMovePlayableNow(m, lastEvalFen))
-  )).slice(0, 3);
+  )).slice(0, 4);
   if (!pool.length) return fallback;
 
-  // Humanized "legit":
-  // - Mostly best move
-  // - Sometimes small inaccuracy (2nd/3rd line)
-  // - Rare tiny blunder-like choice (worst available in top lines)
-  if (pool.length === 1) return pool[0] || fallback;
-  const roll = Math.random();
-  if (roll < 0.58) return pool[0] || fallback;
-  if (roll < 0.83) return pool[Math.min(1, pool.length - 1)] || fallback;
-  if (roll < 0.95) return pool[Math.min(2, pool.length - 1)] || fallback;
-  return pool[pool.length - 1] || fallback;
+  const boardEl = getBoardElement();
+  const fenTurn = normalizeTurn((lastEvalFen || '').split(' ')[1]);
+  const playerSide = getPlayerSide(boardEl);
+  const ownClockSec = (boardEl && playerSide && fenTurn && playerSide === fenTurn)
+    ? getOwnClockSecondsRemaining(boardEl, playerSide, fenTurn)
+    : null;
+  const fullmove = getReliableFullmoveNumber();
+
+  return chooseLegitAutomoveMove(pool, fallback, playerSide, lastEvalPvLines, ownClockSec, fullmove);
+}
+
+function makePremoveKey(fen, move) {
+  const boardAndTurn = getFenBoardAndTurn(fen);
+  const uci = extractUciMove(move);
+  if (!boardAndTurn || !uci) return null;
+  return `${boardAndTurn}|${uci}`;
+}
+
+function isPremoveBlockedFor(fen, move) {
+  const key = makePremoveKey(fen, move);
+  if (!key) return false;
+  if (premoveLastAttemptKey !== key) return false;
+  if (now() >= premoveBlockedUntil) {
+    premoveLastAttemptKey = null;
+    premoveBlockedUntil = 0;
+    return false;
+  }
+  return true;
+}
+
+function blockPremoveFor(fen, move, ms = 1500) {
+  const key = makePremoveKey(fen, move);
+  if (!key) return;
+  premoveLastAttemptKey = key;
+  premoveBlockedUntil = now() + ms;
+}
+
+function clearPremoveSchedule() {
+  if (premoveTimeout) {
+    clearTimeout(premoveTimeout);
+    premoveTimeout = null;
+  }
+  premoveScheduledAt = 0;
+  premoveDelayMs = 0;
+  premovePlannedMove = null;
+  premoveTargetFen = null;
+}
+
+function buildPremovePlanFromPv(fen, pvMoves, playerSide) {
+  if (!fen || !Array.isArray(pvMoves) || pvMoves.length < 2 || !playerSide) return null;
+  const parts = fen.trim().split(/\s+/);
+  const turn = normalizeTurn(parts[1]);
+  const board = expandFenBoard(parts[0]);
+  if (!turn || !board) return null;
+  if (turn === playerSide) return null;
+
+  const opp = splitUciMove(pvMoves[0]);
+  const rep = splitUciMove(pvMoves[1]);
+  if (!opp || !rep) return null;
+
+  const boardBefore = cloneFenBoard(board);
+  if (!boardBefore) return null;
+  const oppPiece = pieceAtFenSquare(boardBefore, opp.from);
+  if (!oppPiece || getPieceColor(oppPiece) !== turn) return null;
+
+  const afterOpp = applyPseudoUciMoveOnBoard(boardBefore, opp.uci);
+  if (!afterOpp) return null;
+
+  const repPiece = pieceAtFenSquare(afterOpp.board, rep.from);
+  if (!repPiece || getPieceColor(repPiece) !== playerSide) return null;
+  const repTarget = pieceAtFenSquare(afterOpp.board, rep.to);
+  if (repTarget && getPieceColor(repTarget) === playerSide) return null;
+
+  const isReplyCapture = !!(repTarget && getPieceColor(repTarget) !== playerSide);
+  const isRecapture = !!(afterOpp.capturedPiece && rep.to === opp.to && isReplyCapture);
+  const isObviousCapture = isRecapture || isReplyCapture;
+
+  return {
+    replyMove: rep.uci,
+    opponentMove: opp.uci,
+    isReplyCapture,
+    isRecapture,
+    isObviousCapture,
+  };
+}
+
+// ── Premove intelligenti solo su risposte forzate ──
+function getSmartPremoveCandidate(playerSide) {
+  if (!automoveUseSmartPremoves || automoveMode !== 'legit') return null;
+  if (!lastEvalMoveSourceFen || !lastEvalFen || !isSameFenBoardAndTurn(lastEvalMoveSourceFen, lastEvalFen)) return null;
+  if (!Array.isArray(lastEvalPvLines) || !lastEvalPvLines.length) return null;
+
+  const lineCandidates = lastEvalPvLines
+    .filter(line => Array.isArray(line?.moves) && line.moves.length >= 2)
+    .slice(0, 4);
+  if (!lineCandidates.length) return null;
+
+  const mainLine = lineCandidates[0];
+  const plan = buildPremovePlanFromPv(lastEvalFen, mainLine.moves, playerSide);
+  if (!plan) return null;
+  if (!plan.isRecapture) return null;
+
+  const opponentMove = extractUciMove(plan.opponentMove);
+  if (!opponentMove) return null;
+
+  // Simula la posizione dopo la mossa dell'avversario
+  const parts = lastEvalFen.trim().split(/\s+/);
+  const boardBefore = expandFenBoard(parts[0]);
+  if (!boardBefore) return null;
+  const afterBoard = applyPseudoUciMoveOnBoard(cloneFenBoard(boardBefore), opponentMove);
+  if (!afterBoard) return null;
+
+  // Conta le possibili mosse del nostro colore
+  const legalReplies = countLegalMovesForColor(afterBoard.board, playerSide);
+  // Evita premove aggressivi: consenti solo in casi molto ovvi (ricattura con poche alternative).
+  if (legalReplies < 1 || legalReplies > 2) return null;
+
+  return {
+    move: plan.replyMove,
+    reason: 'obvious-recapture',
+    opponentMove: plan.opponentMove,
+    isCapture: plan.isReplyCapture,
+  };
+}
+
+function scheduleSmartPremove(move, targetFen, meta = {}) {
+  const uci = extractUciMove(move);
+  const key = makePremoveKey(targetFen, uci);
+  if (!uci || !key) return;
+  if (isPremoveBlockedFor(targetFen, uci)) return;
+
+  const alreadyScheduled = !!(
+    premoveTimeout &&
+    premoveTargetFen &&
+    targetFen &&
+    isSameFenBoardAndTurn(premoveTargetFen, targetFen) &&
+    premovePlannedMove === uci
+  );
+  if (alreadyScheduled) return;
+
+  clearPremoveSchedule();
+  premovePlannedMove = uci;
+  premoveTargetFen = targetFen;
+  premoveDelayMs = 85 + Math.floor(Math.random() * 190);
+  premoveScheduledAt = now();
+
+  premoveTimeout = setTimeout(() => {
+    premoveTimeout = null;
+    if (!isAutomoveEnabled || !automoveUseSmartPremoves || automoveMode !== 'legit') return;
+
+    const boardEl = getBoardElement();
+    if (!boardEl) return;
+    const side = getPlayerSide(boardEl);
+    const nowTurn = detectSideToMove();
+    if (side && nowTurn && side === nowTurn) return;
+
+    const liveFen = getFenFromPage();
+    if (!isSameFenBoardAndTurn(liveFen, premoveTargetFen)) return;
+
+    const sent = executeAutomoveMove(premovePlannedMove);
+    automoveLog('premove dispatched', {
+      move: premovePlannedMove,
+      sent,
+      delayMs: premoveDelayMs,
+      reason: meta.reason,
+      opponentMove: meta.opponentMove
+    });
+    blockPremoveFor(premoveTargetFen, premovePlannedMove, sent ? 1700 : 900);
+    premoveScheduledAt = 0;
+    premoveDelayMs = 0;
+    premovePlannedMove = null;
+    premoveTargetFen = null;
+  }, premoveDelayMs);
 }
 
 function parseClockTextToSeconds(text) {
@@ -1078,7 +1678,7 @@ function computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, profile = '
     return { minSec, maxSec, reasons, ownClockSec: null };
   }
 
-  const fullmove = getReliableFullmoveNumber();
+  const fullmove = getFullmoveNumberFromMoveListOnly();
   if (automoveFastInOpening && Number.isInteger(fullmove) && fullmove <= 8) {
     // Keep it fast, but not unrealistically instant (reduces stalled retries).
     minSec = Math.min(minSec, 0.32);
@@ -1229,6 +1829,7 @@ async function performAutomove() {
   if (!assistProfile) {
     automoveLog('cancel: disabled');
     clearAutomoveSchedule();
+    clearPremoveSchedule();
     return;
   }
 
@@ -1236,6 +1837,7 @@ async function performAutomove() {
   if (!boardEl) {
     automoveLog('cancel: no board');
     clearAutomoveSchedule();
+    clearPremoveSchedule();
     return;
   }
 
@@ -1243,10 +1845,45 @@ async function performAutomove() {
   const detectedTurn = detectSideToMove();
   const fenTurn = normalizeTurn((lastEvalFen || '').split(' ')[1]);
   const turn = detectedTurn || fenTurn;
+
+  // Optional smart premove logic: only in online AutoMove + legit mode.
+  if (
+    assistProfile === 'automove' &&
+    playerSide &&
+    turn &&
+    playerSide !== turn
+  ) {
+    clearAutomoveSchedule();
+    if (!automoveUseSmartPremoves || automoveMode !== 'legit') {
+      clearPremoveSchedule();
+      return;
+    }
+
+    const premoveCandidate = getSmartPremoveCandidate(playerSide);
+    if (!premoveCandidate || !lastEvalFen) {
+      clearPremoveSchedule();
+      return;
+    }
+    if (isPremoveBlockedFor(lastEvalFen, premoveCandidate.move)) {
+      return;
+    }
+
+    scheduleSmartPremove(premoveCandidate.move, lastEvalFen, {
+      reason: premoveCandidate.reason,
+      opponentMove: premoveCandidate.opponentMove
+    });
+    return;
+  }
+
+  // Once it's our turn (or unknown), drop any queued premove schedule.
+  clearPremoveSchedule();
+
   const bestMove = getAutomoveCandidateMove(assistProfile);
   const hasPlannedForCurrentFen = !!(
     automoveTimeout &&
-    automoveTargetFen === lastEvalFen &&
+    automoveTargetFen &&
+    lastEvalFen &&
+    isSameFenBoardAndTurn(automoveTargetFen, lastEvalFen) &&
     automovePlannedMove &&
     automoveScheduledProfile === assistProfile
   );
@@ -1282,7 +1919,7 @@ async function performAutomove() {
     clearAutomoveSchedule(false);
   }
 
-  if ((playerSide && turn && playerSide !== turn) || !bestMove || !lastEvalFen || !isMovePlayableNow(bestMove, lastEvalFen)) {
+  if (!bestMove || !lastEvalFen || !isMovePlayableNow(bestMove, lastEvalFen)) {
     automoveLog('cancel: preconditions', {
       profile: assistProfile,
       playerSide,
@@ -1304,7 +1941,12 @@ async function performAutomove() {
     return;
   }
 
-  const needsReschedule = !automoveTimeout || automoveTargetFen !== lastEvalFen || automoveScheduledProfile !== assistProfile;
+  const sameTargetFen = !!(
+    automoveTargetFen &&
+    lastEvalFen &&
+    isSameFenBoardAndTurn(automoveTargetFen, lastEvalFen)
+  );
+  const needsReschedule = !automoveTimeout || !sameTargetFen || automoveScheduledProfile !== assistProfile;
   if (!needsReschedule) {
     updateAutomoveButtonState();
     return;
@@ -1317,7 +1959,11 @@ async function performAutomove() {
   const delayCfg = computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, assistProfile);
   const minMs = Math.round(delayCfg.minSec * 1000);
   const maxMs = Math.round(delayCfg.maxSec * 1000);
-  automoveDelayMs = minMs + Math.floor(Math.random() * (Math.max(0, maxMs - minMs) + 1));
+  const instantObvious = shouldBypassAutomoveDelay(assistProfile, automovePlannedMove, automoveTargetFen);
+  if (instantObvious) delayCfg.reasons.push('obvious-instant');
+  automoveDelayMs = instantObvious
+    ? 0
+    : (minMs + Math.floor(Math.random() * (Math.max(0, maxMs - minMs) + 1)));
   automoveScheduledAt = now();
   automoveLog('scheduled', {
     profile: assistProfile,
@@ -1327,7 +1973,7 @@ async function performAutomove() {
     mode: automoveMode,
     delayReasons: delayCfg.reasons,
     ownClockSec: delayCfg.ownClockSec,
-    topMoves: (lastEvalTopMoves || []).slice(0, 3)
+    topMoves: (lastEvalTopMoves || []).slice(0, 4)
   });
   updateAutomoveButtonState();
   startAutomoveUiTicker();
@@ -1722,8 +2368,19 @@ let puzzleRushPositionStartedAt = 0;
 let puzzleRushPositionKey = null;
 let puzzleRushFallbackDepth = null;
 
+function getEvalFenCacheToken(fen) {
+  if (typeof fen !== 'string') return String(fen || '');
+  const parts = fen.trim().split(/\s+/);
+  if (parts.length < 2 || !expandFenBoard(parts[0])) return fen;
+  const turn = normalizeTurn(parts[1]);
+  if (!turn) return fen;
+  const castling = normalizeCastlingRights(parts[2] || '-');
+  const enPassant = /^(?:-|[a-h][36])$/.test(parts[3] || '') ? parts[3] : '-';
+  return `${parts[0]} ${turn} ${castling} ${enPassant}`;
+}
+
 function getEvalCacheKey(fen, depth) {
-  return `${depth}|${fen}`;
+  return `${depth}|${getEvalFenCacheToken(fen)}`;
 }
 
 function getCachedEval(fen, depth) {
@@ -1794,11 +2451,18 @@ function getEvalQueryDepth(fen = lastEvalFen) {
     }
     return Math.max(1, Math.min(30, puzzleRushDepth));
   }
+
+  if (isAutomoveEnabled && !isPuzzleContext()) {
+    // Keep eval snappy in AutoMove contexts (live and vs bots).
+    const fastDepthCap = automoveMode === 'legit' ? 7 : 9;
+    return Math.max(5, Math.min(fastDepthCap, suggestMoveDepth));
+  }
+
   return Math.max(1, Math.min(15, suggestMoveDepth));
 }
 
 function isEvalProxyUrl(url) {
-  return /^https:\/\/(?:stockfish\.online|lichess\.org)\//i.test(String(url || ''));
+  return /^https:\/\/stockfish\.online\//i.test(String(url || ''));
 }
 
 function makeAbortError() {
@@ -1825,7 +2489,7 @@ function withAbort(promise, signal) {
   });
 }
 
-function fetchJsonViaBackground(url, { signal, headers } = {}) {
+function fetchJsonViaBackground(url, { signal, headers, timeoutMs, abortKey } = {}) {
   const runtime = chrome?.runtime;
   if (!runtime?.id || typeof runtime.sendMessage !== 'function') {
     return Promise.reject(new Error('runtime-not-available'));
@@ -1833,7 +2497,7 @@ function fetchJsonViaBackground(url, { signal, headers } = {}) {
 
   const request = new Promise((resolve, reject) => {
     runtime.sendMessage(
-      { type: 'cse-fetch-json', url, headers },
+      { type: 'cse-fetch-json', url, headers, timeoutMs, abortKey },
       (response) => {
         const runtimeError = chrome.runtime.lastError;
         if (runtimeError) {
@@ -1852,10 +2516,10 @@ function fetchJsonViaBackground(url, { signal, headers } = {}) {
   return withAbort(request, signal);
 }
 
-async function fetchJsonWithStatus(url, { signal, headers } = {}) {
+async function fetchJsonWithStatus(url, { signal, headers, timeoutMs, abortKey } = {}) {
   if (isEvalProxyUrl(url)) {
     try {
-      return await fetchJsonViaBackground(url, { signal, headers });
+      return await fetchJsonViaBackground(url, { signal, headers, timeoutMs, abortKey });
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
     }
@@ -1882,19 +2546,105 @@ async function fetchEval(fen) {
   evalAbortController = new AbortController();
   const signal = evalAbortController.signal;
   const turn = fen.split(' ')[1] || 'w';
+  const fastEvalMode = !!(isAutomoveEnabled || isPuzzleRushEnabled);
   const normalizeTopMoves = (moves) =>
-    Array.from(new Set((moves || []).map(extractUciMove).filter(Boolean))).slice(0, 3);
+    Array.from(new Set((moves || []).map(extractUciMove).filter(Boolean))).slice(0, 4);
+  const withTimeout = (promise, ms) => {
+    if (!Number.isFinite(ms) || ms <= 0) return promise;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TimeoutError')), ms))
+    ]);
+  };
+  const extractStockfishMoves = (payload, primaryMove) => {
+    const collected = [primaryMove];
+    const addFrom = (value) => {
+      if (!value) return;
+      if (Array.isArray(value)) {
+        value.forEach(addFrom);
+        return;
+      }
+      if (typeof value === 'string') {
+        const first = value.trim().split(/\s+/)[0];
+        if (first) collected.push(first);
+        return;
+      }
+      if (typeof value === 'object') {
+        addFrom(value.bestmove);
+        addFrom(value.move);
+        addFrom(value.pv);
+        addFrom(value.line);
+      }
+    };
+
+    addFrom(payload?.topMoves);
+    addFrom(payload?.topmoves);
+    addFrom(payload?.multiPv);
+    addFrom(payload?.multipv);
+    addFrom(payload?.lines);
+    addFrom(payload?.pv);
+    addFrom(payload?.continuation);
+    return normalizeTopMoves(collected);
+  };
 
   // Primary: stockfish.online — real Stockfish engine, depth 15
   try {
-    const url = `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${queryDepth}`;
-    const res = await fetchJsonWithStatus(url, { signal });
+    const baseStockfishUrl = (depth) =>
+      `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${depth}&multiPv=4`;
+    const url = baseStockfishUrl(queryDepth);
+    const stockfishTimeoutMs = fastEvalMode ? STOCKFISH_TIMEOUT_FAST_MS : 0;
+    const res = await withTimeout(
+      fetchJsonWithStatus(url, {
+        signal,
+        timeoutMs: stockfishTimeoutMs,
+        abortKey: 'eval-stockfish'
+      }),
+      stockfishTimeoutMs ? stockfishTimeoutMs + 150 : 0
+    );
     if (res.ok) {
       const data = res.data;
       if (data.success) {
         const bestMove = extractUciMove(data.bestmove);
+        let topMoves = extractStockfishMoves(data, bestMove);
+
+        // In legit mode we need more than one candidate often, but probing is expensive.
+        // Keep it for non-automove analysis only to avoid move latency.
+        const shouldProbeExtra =
+          !isAutomoveEnabled &&
+          !isPuzzleRushEnabled &&
+          automoveMode === 'legit' &&
+          !isPuzzleContext();
+        if (shouldProbeExtra && topMoves.length < 3) {
+          const probeDepths = Array.from(new Set([
+            Math.max(6, queryDepth - 2),
+            Math.max(6, queryDepth - 5),
+            Math.max(6, queryDepth - 8),
+          ])).filter(d => d !== queryDepth);
+
+          for (const depth of probeDepths) {
+            if (signal.aborted || topMoves.length >= 4) break;
+            try {
+              const probeRes = await fetchJsonWithStatus(baseStockfishUrl(depth), {
+                signal,
+                abortKey: 'eval-stockfish'
+              });
+              if (!probeRes?.ok || !probeRes?.data?.success) continue;
+              const probeMove = extractUciMove(probeRes.data.bestmove);
+              topMoves = normalizeTopMoves([...topMoves, probeMove]);
+            } catch (probeErr) {
+              if (probeErr?.name === 'AbortError') throw probeErr;
+            }
+          }
+        }
+
         if (data.mate !== null && data.mate !== undefined && data.mate !== 0) {
-          const result = { cp: null, mate: turn === 'w' ? data.mate : -data.mate, bestMove, topMoves: normalizeTopMoves([bestMove]) };
+          const result = {
+            cp: null,
+            mate: turn === 'w' ? data.mate : -data.mate,
+            bestMove,
+            topMoves,
+            pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: null, mate: idx === 0 ? data.mate : null }))
+          };
           setCachedEval(fen, queryDepth, result);
           registerEvalSuccess();
           return result;
@@ -1902,7 +2652,13 @@ async function fetchEval(fen) {
         const cpRaw = Math.round(parseFloat(data.evaluation) * 100);
         const cp = turn === 'w' ? cpRaw : -cpRaw;
         if (!isNaN(cp)) {
-          const result = { cp, mate: null, bestMove, topMoves: normalizeTopMoves([bestMove]) };
+          const result = {
+            cp,
+            mate: null,
+            bestMove,
+            topMoves,
+            pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: idx === 0 ? cp : null, mate: null }))
+          };
           setCachedEval(fen, queryDepth, result);
           registerEvalSuccess();
           return result;
@@ -1911,34 +2667,6 @@ async function fetchEval(fen) {
     }
   } catch (e) {
     if (e.name === 'AbortError') return null; // newer position superseded this one
-  }
-
-  // Fallback: Lichess cloud-eval (instant if cached, 404 if not)
-  try {
-    const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=3`;
-    const res = await fetchJsonWithStatus(url, { headers: { 'Accept': 'application/json' }, signal });
-    if (res.ok) {
-      const data = res.data;
-      const topMoves = normalizeTopMoves((data.pvs || []).map(pv => pv.moves));
-      const pv = data.pvs && data.pvs[0];
-      if (pv) {
-        const bestMove = extractUciMove(pv.moves);
-        if (pv.mate !== undefined) {
-          const result = { cp: null, mate: turn === 'w' ? pv.mate : -pv.mate, bestMove, topMoves: normalizeTopMoves([bestMove, ...topMoves]) };
-          setCachedEval(fen, queryDepth, result);
-          registerEvalSuccess();
-          return result;
-        }
-        if (pv.cp  !== undefined) {
-          const result = { cp: turn === 'w' ? pv.cp : -pv.cp, mate: null, bestMove, topMoves: normalizeTopMoves([bestMove, ...topMoves]) };
-          setCachedEval(fen, queryDepth, result);
-          registerEvalSuccess();
-          return result;
-        }
-      }
-    }
-  } catch (e) {
-    if (e.name === 'AbortError') return null;
   }
 
   registerEvalFailure();
@@ -2311,6 +3039,8 @@ function updateEvalBarDisplay(result) {
   if (!result) {
     currentBestMove = null;
     lastEvalTopMoves = [];
+    lastEvalPvLines = [];
+    lastEvalMate = null;
     lastEvalMoveSourceFen = null;
     clearBestMoveOverlay();
 
@@ -2330,7 +3060,9 @@ function updateEvalBarDisplay(result) {
   }
 
   lastEvalMoveSourceFen = lastEvalFen;
-  lastEvalTopMoves = Array.isArray(result.topMoves) ? result.topMoves.slice(0, 3) : [];
+  lastEvalTopMoves = Array.isArray(result.topMoves) ? result.topMoves.slice(0, 4) : [];
+  lastEvalPvLines = Array.isArray(result.pvLines) ? result.pvLines.slice(0, 4) : [];
+  lastEvalMate = Number.isFinite(result.mate) ? result.mate : null;
   setBestMove(result.bestMove);
 
   let whitePct;
@@ -2408,9 +3140,11 @@ function applySavedGuiAndModuleState() {
     if (automoveDelayMax < automoveDelayMin) automoveDelayMax = automoveDelayMin;
     automoveFastWhenLowTime = !!saved.settings.automoveFastWhenLowTime;
     automoveFastInOpening = !!saved.settings.automoveFastInOpening;
-    if (Number.isFinite(saved.settings.puzzleRushDepth)) puzzleRushDepth = Math.max(1, Math.min(30, Math.round(saved.settings.puzzleRushDepth)));
+    automoveUseSmartPremoves = !!saved.settings.automoveUseSmartPremoves;
+    if (Number.isFinite(saved.settings.puzzleRushDepth)) puzzleRushDepth = Math.max(1, Math.min(15, Math.round(saved.settings.puzzleRushDepth)));
     if (Number.isFinite(saved.settings.suggestMoveDepth)) suggestMoveDepth = Math.max(1, Math.min(15, Math.round(saved.settings.suggestMoveDepth)));
     stockfishAutoReloadEnabled = !!saved.settings.stockfishAutoReloadEnabled;
+    autoPlayAcceptRematch = saved.settings.autoPlayAcceptRematch !== false;
   }
 }
 
@@ -2462,8 +3196,11 @@ function reloadStockfishConnection(reason = 'manual-ui', forceTick = true) {
   lastEvalMoveSourceFen = null;
   currentBestMove = null;
   lastEvalTopMoves = [];
+  lastEvalPvLines = [];
+  lastEvalMate = null;
   stockfishNoFenSinceAt = 0;
   hideBestMoveOverlay();
+  clearPremoveSchedule();
   resetStockfishFailureTracking();
   stockfishLastReloadAt = now();
   automoveLog('stockfish reload', { reason });
@@ -2489,19 +3226,28 @@ function formatAgo(ts) {
   return `${min}m ${rem}s ago`;
 }
 
+function getEvalTickIntervalMs() {
+  if (isAutomoveEnabled || isPuzzleRushEnabled) return EVAL_TICK_FAST_MS;
+  return EVAL_TICK_NORMAL_MS;
+}
+
 function stopEvalEngine() {
   if (evalUpdateInterval) {
     clearInterval(evalUpdateInterval);
     evalUpdateInterval = null;
   }
+  evalTickIntervalMs = 0;
   resetStockfishFailureTracking();
   clearPuzzleRushDepthFallback();
   evalRequestSeq++;
   clearAutomoveSchedule();
+  clearPremoveSchedule();
   lastEvalFen = null;
   lastEvalMoveSourceFen = null;
   currentBestMove = null;
   lastEvalTopMoves = [];
+  lastEvalPvLines = [];
+  lastEvalMate = null;
   hideBestMoveOverlay();
 }
 
@@ -2511,9 +3257,12 @@ function ensureEvalEngineState(forceTick = false) {
     stopEvalEngine();
     return;
   }
-  if (!evalUpdateInterval) {
+  const desiredTickMs = getEvalTickIntervalMs();
+  if (!evalUpdateInterval || evalTickIntervalMs !== desiredTickMs) {
+    if (evalUpdateInterval) clearInterval(evalUpdateInterval);
+    evalTickIntervalMs = desiredTickMs;
     tickEvalBar();
-    evalUpdateInterval = setInterval(tickEvalBar, 1000);
+    evalUpdateInterval = setInterval(tickEvalBar, desiredTickMs);
     return;
   }
   if (forceTick) tickEvalBar();
@@ -2593,7 +3342,7 @@ function cseRenderGui() {
   const allMods = [
     { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled, hasSettings: true },
     { id: 'PuzzleRush', label: 'Puzzle Rush', active: isPuzzleRushEnabled, hasSettings: true },
-    { id: 'AutoPlay', label: 'AutoPlay', active: isAutoPlayEnabled, hasSettings: false },
+    { id: 'AutoPlay', label: 'AutoPlay', active: isAutoPlayEnabled, hasSettings: true },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
@@ -2625,7 +3374,7 @@ function cseRenderGui() {
         <div class="cse-mc-settings-title">Stockfish</div>
         <label class="cse-mc-check cse-mc-settings-check">
           <input type="checkbox" id="cse-stockfish-auto-reload" ${stockfishAutoReloadEnabled ? 'checked' : ''}>
-          <span>Auto reload every 15s when eval is stuck</span>
+          <span>Auto reload every 10s when eval is stuck</span>
         </label>
         <button class="cse-mc-settings-btn" id="cse-stockfish-reload-now">Reload Stockfish now</button>
         <div class="cse-mc-settings-status">
@@ -2700,6 +3449,7 @@ function cseRenderGui() {
         isAutomoveEnabled = !isAutomoveEnabled;
         if (!isAutomoveEnabled) {
           clearAutomoveSchedule();
+          clearPremoveSchedule();
           if (!isPuzzleRushEnabled) stopAutomoveUiTicker();
         } else {
           startAutomoveUiTicker();
@@ -2779,6 +3529,7 @@ function cseRenderSettingsPanel(modId) {
 
   const isAuto = modId === 'AutoMove';
   const isPuzzleRush = modId === 'PuzzleRush';
+  const isAutoPlay = modId === 'AutoPlay';
   const isDepth = modId === 'SuggestMove' || modId === 'EvaluationBar';
   ov.innerHTML = `
     <div class="cse-mc-spanel">
@@ -2814,13 +3565,26 @@ function cseRenderSettingsPanel(modId) {
             <span>Fast in opening (first 8 moves)</span>
           </label>
         </div>
+        <div class="cse-mc-srow cse-mc-check-row">
+          <label class="cse-mc-check">
+            <input type="checkbox" id="cse-sp-smart-premoves" ${automoveUseSmartPremoves ? 'checked' : ''}>
+            <span>Smart premoves</span>
+          </label>
+        </div>
       ` : isPuzzleRush ? `
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-pr-depth-val">${puzzleRushDepth}</span></div>
-          <input type="range" class="cse-mc-slider" id="cse-sp-pr-depth" min="1" max="30" step="1" value="${puzzleRushDepth}">
+          <input type="range" class="cse-mc-slider" id="cse-sp-pr-depth" min="1" max="15" step="1" value="${puzzleRushDepth}">
         </div>
         <div class="cse-mc-srow">
           <span class="cse-mc-slabel">Turbo mode for puzzles only.</span>
+        </div>
+      ` : isAutoPlay ? `
+        <div class="cse-mc-srow cse-mc-check-row">
+          <label class="cse-mc-check">
+            <input type="checkbox" id="cse-sp-autoplay-rematch" ${autoPlayAcceptRematch ? 'checked' : ''}>
+            <span>Accetta rivincite se richieste</span>
+          </label>
         </div>
       ` : isDepth ? `
         <div class="cse-mc-srow">
@@ -2938,6 +3702,7 @@ function cseRenderSettingsPanel(modId) {
 
     const lowtimeCb = ov.querySelector('#cse-sp-fast-lowtime');
     const openingCb = ov.querySelector('#cse-sp-fast-opening');
+    const premoveCb = ov.querySelector('#cse-sp-smart-premoves');
     if (lowtimeCb) {
       lowtimeCb.addEventListener('change', () => {
         automoveFastWhenLowTime = !!lowtimeCb.checked;
@@ -2950,6 +3715,13 @@ function cseRenderSettingsPanel(modId) {
         cseSaveState();
       });
     }
+    if (premoveCb) {
+      premoveCb.addEventListener('change', () => {
+        automoveUseSmartPremoves = !!premoveCb.checked;
+        if (!automoveUseSmartPremoves) clearPremoveSchedule();
+        cseSaveState();
+      });
+    }
   } else if (isPuzzleRush) {
     const prDepth = ov.querySelector('#cse-sp-pr-depth');
     if (!prDepth) return;
@@ -2959,8 +3731,19 @@ function cseRenderSettingsPanel(modId) {
       clearPuzzleRushDepthFallback();
       evalCache.clear();
       lastEvalFen = null;
+      lastEvalPvLines = [];
+      lastEvalMate = null;
       cseSaveState();
       ensureEvalEngineState(true);
+    });
+  } else if (isAutoPlay) {
+    const rematchCb = ov.querySelector('#cse-sp-autoplay-rematch');
+    if (!rematchCb) return;
+    rematchCb.addEventListener('change', () => {
+      autoPlayAcceptRematch = !!rematchCb.checked;
+      autoPlayHandledToken = null;
+      cseSaveState();
+      if (isAutoPlayEnabled) performAutoPlayTick();
     });
   } else if (isDepth) {
     const depSl = ov.querySelector('#cse-sp-depth');
@@ -2970,6 +3753,8 @@ function cseRenderSettingsPanel(modId) {
       ov.querySelector('#cse-sp-depth-val').textContent = suggestMoveDepth;
       evalCache.clear();
       lastEvalFen = null;
+      lastEvalPvLines = [];
+      lastEvalMate = null;
       cseSaveState();
       ensureEvalEngineState(true);
     });
@@ -3175,6 +3960,8 @@ async function tickEvalBar() {
     lastEvalMoveSourceFen = null;
     currentBestMove = null;
     lastEvalTopMoves = [];
+    lastEvalPvLines = [];
+    lastEvalMate = null;
     if (evalBarPanel?.isConnected) {
       const scoreEl = evalBarPanel.querySelector('[data-cse-part="score"]');
       if (scoreEl) scoreEl.textContent = '?';
@@ -3182,6 +3969,7 @@ async function tickEvalBar() {
     }
     hideBestMoveOverlay();
     clearAutomoveSchedule();
+    clearPremoveSchedule();
     maybeAutoReloadStockfish();
     return;
   }
@@ -3189,8 +3977,14 @@ async function tickEvalBar() {
 
   const fallbackDepthActivated = updatePuzzleRushDepthFallback(fen);
 
-  if (fen === lastEvalFen && !fallbackDepthActivated) {
-    const hasEvalMoveForFen = !!(lastEvalMoveSourceFen === lastEvalFen && extractUciMove(currentBestMove));
+  const sameBoardTurnFen = !!(lastEvalFen && isSameFenBoardAndTurn(fen, lastEvalFen));
+  if (sameBoardTurnFen && !fallbackDepthActivated) {
+    const hasEvalMoveForFen = !!(
+      lastEvalMoveSourceFen &&
+      lastEvalFen &&
+      isSameFenBoardAndTurn(lastEvalMoveSourceFen, lastEvalFen) &&
+      extractUciMove(currentBestMove)
+    );
     if (arrowsEnabled) syncBestMoveOverlay();
     else hideBestMoveOverlay();
     if (hasEvalMoveForFen && (isAutomoveEnabled || isPuzzleRushEnabled)) performAutomove();
@@ -3202,6 +3996,8 @@ async function tickEvalBar() {
     lastEvalMoveSourceFen = null;
     currentBestMove = null;
     lastEvalTopMoves = [];
+    lastEvalPvLines = [];
+    lastEvalMate = null;
   }
 
   lastEvalFen = fen;
@@ -3349,7 +4145,10 @@ new MutationObserver(() => {
     lastEvalFen = null;
     currentBestMove = null;
     lastEvalTopMoves = [];
+    lastEvalPvLines = [];
+    lastEvalMate = null;
     lastEvalMoveSourceFen = null;
+    clearPremoveSchedule();
     clearAutoPlaySchedule(true);
     if (isAutoPlayEnabled) performAutoPlayTick();
     setTimeout(scanAndInject, 1000);
