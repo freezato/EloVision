@@ -1,188 +1,11 @@
-// Chess.com Opponent Stats Extension
+﻿// Chess.com Opponent Stats Extension
 // Updated: legit mode improvements, ETA timer fix, forced premoves only
 
-const CACHE = {};
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-const panelByUsername = new Map();
-const injectedUsernameEls = new WeakSet();
-
-// ─── Utility ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Utility â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function now() { return Date.now(); }
 
-function daysAgo(days) {
-  return Math.floor((now() - days * 86400000) / 1000);
-}
-
-async function fetchJSON(url) {
-  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-async function cachedFetch(url) {
-  if (CACHE[url] && now() - CACHE[url].ts < CACHE_TTL) return CACHE[url].data;
-  const data = await fetchJSON(url);
-  CACHE[url] = { ts: now(), data };
-  return data;
-}
-
-// ─── Chess.com API ───────────────────────────────────────────────────────────
-
-async function getPlayerStats(username) {
-  return cachedFetch(`https://api.chess.com/pub/player/${username}/stats`);
-}
-
-async function getPlayerMonthArchives(username) {
-  const data = await cachedFetch(`https://api.chess.com/pub/player/${username}/games/archives`);
-  return data.archives || [];
-}
-
-async function getGamesFromArchive(url) {
-  try {
-    const data = await cachedFetch(url);
-    return data.games || [];
-  } catch { return []; }
-}
-
-async function getRecentGames(username, days) {
-  const archives = await getPlayerMonthArchives(username);
-  const cutoff = daysAgo(days);
-  const userLower = username.toLowerCase();
-
-  // Determine which archives to fetch (current + previous months as needed)
-  const relevantArchives = archives.slice(-Math.min(3, archives.length));
-
-  const allGames = [];
-  for (const archiveUrl of relevantArchives) {
-    const games = await getGamesFromArchive(archiveUrl);
-    for (const g of games) {
-      if (g.end_time >= cutoff) allGames.push({ ...g, _username: userLower });
-    }
-  }
-  return allGames;
-}
-
-function calcWLR(games, username) {
-  let wins = 0, losses = 0, draws = 0;
-  const user = username.toLowerCase();
-  for (const g of games) {
-    const white = (g.white?.username || '').toLowerCase();
-    const isWhite = white === user;
-    const result = isWhite ? g.white?.result : g.black?.result;
-    if (result === 'win') wins++;
-    else if (['checkmated', 'timeout', 'resigned', 'lose', 'abandoned'].includes(result)) losses++;
-    else draws++;
-  }
-  const total = wins + losses + draws;
-  const wlr = losses === 0 ? (wins > 0 ? '∞' : '—') : (wins / losses).toFixed(2);
-  return { wins, losses, draws, total, wlr };
-}
-
-function getPeakRating(stats) {
-  const modes = ['chess_rapid', 'chess_blitz', 'chess_bullet', 'chess_daily'];
-  let peak = 0;
-  let peakMode = '—';
-  for (const mode of modes) {
-    const best = stats?.[mode]?.best?.rating;
-    if (best && best > peak) { peak = best; peakMode = mode.replace('chess_', ''); }
-  }
-  return { peak, peakMode };
-}
-
-function getCurrentRating(stats) {
-  const modes = ['chess_rapid', 'chess_blitz', 'chess_bullet'];
-  const result = {};
-  for (const mode of modes) {
-    const last = stats?.[mode]?.last?.rating;
-    if (last) result[mode.replace('chess_', '')] = last;
-  }
-  return result;
-}
-
-// ─── UI ──────────────────────────────────────────────────────────────────────
-
-function createPanel(username) {
-  const panel = document.createElement('div');
-  panel.className = 'cse-panel';
-  panel.innerHTML = `
-    <div class="cse-header">
-      <span class="cse-title">♟ <a href="https://www.chess.com/member/${username}" target="_blank">${username}</a></span>
-      <button class="cse-close" title="Chiudi">✕</button>
-    </div>
-    <div class="cse-loading">
-      <div class="cse-spinner"></div>
-      <span>Caricamento statistiche…</span>
-    </div>
-    <div class="cse-content" style="display:none"></div>
-  `;
-  panel.querySelector('.cse-close').addEventListener('click', () => {
-    panelByUsername.delete(username);
-    panel.remove();
-  });
-  document.body.appendChild(panel);
-  makeDraggable(panel);
-  panelByUsername.set(username, panel);
-  return panel;
-}
-
-function renderStats(panel, username, stats1, stats7, stats30, playerStats) {
-  const { peak, peakMode } = getPeakRating(playerStats);
-  const currentRatings = getCurrentRating(playerStats);
-
-  const ratingHTML = Object.entries(currentRatings).map(([mode, rating]) =>
-    `<span class="cse-badge">${mode}: <b>${rating}</b></span>`
-  ).join('');
-
-  const peakHTML = peak > 0
-    ? `<span class="cse-badge cse-peak">🏆 Peak ${peakMode}: <b>${peak}</b></span>`
-    : '';
-
-  const periodRow = (label, data) => {
-    const pct = data.total > 0 ? Math.round((data.wins / data.total) * 100) : 0;
-    return `
-      <tr>
-        <td class="cse-period">${label}</td>
-        <td class="cse-w">✅ ${data.wins}</td>
-        <td class="cse-l">❌ ${data.losses}</td>
-        <td class="cse-d">🤝 ${data.draws}</td>
-        <td class="cse-wlr">${data.wlr}</td>
-        <td class="cse-pct">${data.total > 0 ? pct + '%' : '—'}</td>
-      </tr>`;
-  };
-
-  const content = panel.querySelector('.cse-content');
-  content.innerHTML = `
-    <div class="cse-ratings">${ratingHTML}${peakHTML}</div>
-    <table class="cse-table">
-      <thead>
-        <tr>
-          <th>Periodo</th>
-          <th title="Vittorie">✅</th>
-          <th title="Sconfitte">❌</th>
-          <th title="Patte">🤝</th>
-          <th title="Win/Loss Ratio">WLR</th>
-          <th title="Win Rate">Win%</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${periodRow('1 giorno', stats1)}
-        ${periodRow('7 giorni', stats7)}
-        ${periodRow('30 giorni', stats30)}
-      </tbody>
-    </table>
-    <div class="cse-footer">Dati via chess.com API · <span class="cse-time">${new Date().toLocaleTimeString('it-IT')}</span></div>
-  `;
-
-  panel.querySelector('.cse-loading').style.display = 'none';
-  content.style.display = 'block';
-}
-
-function renderError(panel, message) {
-  panel.querySelector('.cse-loading').innerHTML = `<span class="cse-error">⚠️ ${message}</span>`;
-}
-
-// ─── Drag & Drop ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Drag & Drop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function makeDraggable(el) {
   const header = el.querySelector('.cse-header');
@@ -208,41 +31,7 @@ function makeDraggable(el) {
   });
 }
 
-// ─── Main Logic ───────────────────────────────────────────────────────────────
-
-async function loadStatsForUser(username) {
-  const existingPanel = panelByUsername.get(username);
-  if (existingPanel) {
-    existingPanel.remove();
-    panelByUsername.delete(username);
-  }
-
-  const panel = createPanel(username);
-
-  try {
-    const [playerStats, games30] = await Promise.all([
-      getPlayerStats(username),
-      getRecentGames(username, 30)
-    ]);
-
-    const cutoff7 = daysAgo(7);
-    const cutoff1 = daysAgo(1);
-
-    const games7 = games30.filter(g => g.end_time >= cutoff7);
-    const games1 = games30.filter(g => g.end_time >= cutoff1);
-
-    const stats1 = calcWLR(games1, username);
-    const stats7 = calcWLR(games7, username);
-    const stats30 = calcWLR(games30, username);
-
-    renderStats(panel, username, stats1, stats7, stats30, playerStats);
-  } catch (err) {
-    renderError(panel, `Impossibile caricare le stats per "${username}"`);
-    console.error('[ChessStats]', err);
-  }
-}
-
-// ─── Evaluation Bar ───────────────────────────────────────────────────────────
+// â”€â”€â”€ Evaluation Bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let evalBarPanel = null;
 let evalUpdateInterval = null;
@@ -332,7 +121,7 @@ function cseSaveState() {
   } catch {}
 }
 
-// ── FEN extraction ────────────────────────────────────────────
+// â”€â”€ FEN extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function isFen(s) {
   return !!normalizeFen(s);
@@ -523,12 +312,12 @@ function findTurnInObject(root, maxDepth = 2, maxNodes = 120) {
   return null;
 }
 
-// ── Active clock detection (most reliable for live online games) ──────────────
+// â”€â”€ Active clock detection (most reliable for live online games) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // chess.com adds 'clock-player-turn' to the clock element of whoever is to move.
 // IMPORTANT: This function must NOT call getPlayerSide() or getExplicitBoardFlipState()
-// because both internally call inferPlayerSideFromClockAndTurn → detectSideToMove → here,
+// because both internally call inferPlayerSideFromClockAndTurn â†’ detectSideToMove â†’ here,
 // causing infinite recursion (Maximum call stack size exceeded).
-// Use _detectOrientationColor() directly instead — it has no circular dependency.
+// Use _detectOrientationColor() directly instead â€” it has no circular dependency.
 function detectTurnFromActiveClock() {
   // Possible selectors for the currently-ticking clock
   const candidates = [
@@ -543,7 +332,7 @@ function detectTurnFromActiveClock() {
   const boardEl = getBoardElement();
   if (!boardEl) return null;
 
-  // Use _detectOrientationColor directly — avoids the circular recursion that
+  // Use _detectOrientationColor directly â€” avoids the circular recursion that
   // would happen if we called getPlayerSide() or getExplicitBoardFlipState().
   const playerSide = _detectOrientationColor(boardEl);
 
@@ -565,7 +354,7 @@ function detectTurnFromActiveClock() {
       return isBottom ? playerSide : (playerSide === 'w' ? 'b' : 'w');
     }
 
-    // ── IMPORTANT: Do NOT guess when orientation is unknown. ──
+    // â”€â”€ IMPORTANT: Do NOT guess when orientation is unknown. â”€â”€
     // On chess.com the local player is ALWAYS at the bottom regardless of color
     // (the board flips so black's pieces are also at the bottom when playing black).
     // Therefore "isBottom=true" tells us nothing about color without knowing orientation.
@@ -642,7 +431,7 @@ function isElementBottomHalf(el, boardEl = getBoardElement()) {
 }
 
 // Infer local player side using currently active clock position + known side-to-move.
-// IMPORTANT: Do NOT call detectSideToMove() here — that function calls
+// IMPORTANT: Do NOT call detectSideToMove() here â€” that function calls
 // detectTurnFromActiveClock() which calls getPlayerSide() which calls this
 // function, causing infinite recursion. Only use lastEvalFen as source of truth.
 function inferPlayerSideFromClockAndTurn(boardEl = getBoardElement()) {
@@ -651,7 +440,7 @@ function inferPlayerSideFromClockAndTurn(boardEl = getBoardElement()) {
   const isBottom = isElementBottomHalf(clockEl, boardEl);
   if (isBottom === null) return null;
 
-  // Only rely on lastEvalFen — never call detectSideToMove() here.
+  // Only rely on lastEvalFen â€” never call detectSideToMove() here.
   const fenTurn = normalizeTurn((lastEvalFen || '').split(' ')[1]);
   if (!fenTurn) return null;
 
@@ -660,7 +449,7 @@ function inferPlayerSideFromClockAndTurn(boardEl = getBoardElement()) {
   return isBottom ? fenTurn : (fenTurn === 'w' ? 'b' : 'w');
 }
 
-// ── Automove ─────────────────────────────────────────────────────────────────
+// â”€â”€ Automove â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 let isAutomoveEnabled = false;
 let automoveTimeout = null;
 let automoveUiInterval = null;
@@ -891,7 +680,7 @@ function isMateForTurnSoon(fen, mateScore, maxPly = 5) {
   return mateForTurn && Math.abs(mateScore) <= maxPly;
 }
 
-// ── Bypass delay solo per puzzle rush o matto forzato, NON per catture generiche ──
+// â”€â”€ Bypass delay solo per puzzle rush o matto forzato, NON per catture generiche â”€â”€
 function shouldBypassAutomoveDelay(profile, move, fen) {
   if (!move || !fen) return false;
   if (profile === 'puzzleRush') return true;
@@ -1140,7 +929,7 @@ function performAutoPlayTick() {
     return;
   }
 
-  // Gate già rispettato sopra (3s dalla comparsa end-screen): qui clicca quasi subito.
+  // Gate giÃ  rispettato sopra (3s dalla comparsa end-screen): qui clicca quasi subito.
   autoPlayDelayMs = 150 + Math.floor(Math.random() * 201);
   autoPlayScheduledAt = now();
   autoPlayLog('scheduled', { delayMs: autoPlayDelayMs, text: action.text });
@@ -1549,7 +1338,7 @@ function buildPremovePlanFromPv(fen, pvMoves, playerSide) {
   };
 }
 
-// ── Premove intelligenti solo su risposte forzate ──
+// â”€â”€ Premove intelligenti solo su risposte forzate â”€â”€
 function getSmartPremoveCandidate(playerSide) {
   if (!automoveUseSmartPremoves || automoveMode !== 'legit') return null;
   if (!lastEvalMoveSourceFen || !lastEvalFen || !isSameFenBoardAndTurn(lastEvalMoveSourceFen, lastEvalFen)) return null;
@@ -2048,9 +1837,9 @@ async function performAutomove() {
 let _detectSideToMoveInProgress = false;
 
 function detectSideToMove() {
-  // Recursion guard — if we're already inside this function on the call stack,
+  // Recursion guard â€” if we're already inside this function on the call stack,
   // return null rather than blowing the stack. This prevents cycles where
-  // detectTurnFromActiveClock → _detectOrientationColor (or other helpers)
+  // detectTurnFromActiveClock â†’ _detectOrientationColor (or other helpers)
   // end up back here indirectly.
   if (_detectSideToMoveInProgress) return null;
   _detectSideToMoveInProgress = true;
@@ -2062,11 +1851,11 @@ function detectSideToMove() {
 }
 
 function _detectSideToMoveImpl() {
-  // ── Priority 0: active clock (most reliable for live games) ──────────────
+  // â”€â”€ Priority 0: active clock (most reliable for live games) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const clockTurn = detectTurnFromActiveClock();
   if (clockTurn) return clockTurn;
 
-  // ── Priority 1: board element attributes / JS state ──────────────────────
+  // â”€â”€ Priority 1: board element attributes / JS state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const boardEls = document.querySelectorAll('chess-board, wc-chess-board, [data-turn], [data-side-to-move]');
 
   for (const el of boardEls) {
@@ -2087,12 +1876,12 @@ function _detectSideToMoveImpl() {
     if (turnFromState) return turnFromState;
   }
 
-  // ── Priority 1.5: board highlights (last move destination piece color) ───
+  // â”€â”€ Priority 1.5: board highlights (last move destination piece color) â”€â”€â”€
   const hlTurn = detectTurnFromBoardHighlights();
   if (hlTurn) return hlTurn;
 
-  // ── Priority 2: ply count from move list ─────────────────────────────────
-  // After N completed plies: N=0 → white, N=1 → black, N=2 → white …
+  // â”€â”€ Priority 2: ply count from move list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // After N completed plies: N=0 â†’ white, N=1 â†’ black, N=2 â†’ white â€¦
   const plyCount = getPlyCountFromMoveList();
   if (Number.isInteger(plyCount) && plyCount >= 0) return plyCount % 2 === 0 ? 'w' : 'b';
 
@@ -2184,7 +1973,7 @@ function getFenFromPage() {
   // Clock detection is now the highest priority inside detectSideToMove().
   const inferredTurn = detectSideToMove();
 
-  // ── Method 1: Direct JS properties on the custom element ──────
+  // â”€â”€ Method 1: Direct JS properties on the custom element â”€â”€â”€â”€â”€â”€
   // chess.com exposes game state on chess-board / wc-chess-board.
   // We also look for playerColor so we can pass it to normalizeFen as a hint
   // when the FEN string itself lacks a turn field.
@@ -2223,20 +2012,20 @@ function getFenFromPage() {
       if (fen) return fen;
     } catch {}
 
-    // ── Method 2: attribute "fen" on the element itself ──────────
+    // â”€â”€ Method 2: attribute "fen" on the element itself â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     for (const attr of ['fen', 'data-fen']) {
       const attrFen = normalizeFen(el.getAttribute(attr), { turn: turnHint });
       if (attrFen) return attrFen;
     }
   }
 
-  // ── Method 3: any element with a fen attribute ────────────────
+  // â”€â”€ Method 3: any element with a fen attribute â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   for (const el of document.querySelectorAll('[fen], [data-fen]')) {
     const fen = normalizeFen(el.getAttribute('fen') || el.getAttribute('data-fen'), { turn: inferredTurn });
     if (fen) return fen;
   }
 
-  // ── Method 4: scan window for game objects ────────────────────
+  // â”€â”€ Method 4: scan window for game objects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   try {
     for (const key of Object.keys(window)) {
       if (!/(fen|game|chess|board|state|move)/i.test(key)) continue;
@@ -2247,14 +2036,14 @@ function getFenFromPage() {
     }
   } catch {}
 
-  // ── Method 5: URL param ───────────────────────────────────────
+  // â”€â”€ Method 5: URL param â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const m = location.href.match(/[?&]fen=([^&#]+)/);
   if (m) {
     const fen = normalizeFen(decodeURIComponent(m[1]), { turn: inferredTurn });
     if (fen) return fen;
   }
 
-  // ── Method 6: read pieces from Shadow DOM ─────────────────────
+  // â”€â”€ Method 6: read pieces from Shadow DOM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return fenFromPieces();
 }
 
@@ -2305,7 +2094,7 @@ function fenFromPieces() {
     const pieceClass = classes.find(c => pieceMap[c]);
     if (!pieceClass) continue;
 
-    // Find square (e.g. "square-14" → file=1, rank=4)
+    // Find square (e.g. "square-14" â†’ file=1, rank=4)
     const sqClass = classes.find(c => /^square-\d{2}$/.test(c));
     if (!sqClass) continue;
 
@@ -2333,7 +2122,7 @@ function fenFromPieces() {
     if (boardEl) {
       const orientation = boardEl.getAttribute('orientation') || '';
       // If we're playing as black, it might be white's turn after black moves, etc.
-      // Simpler: check the highlighted squares — the last move was made by the opposite color
+      // Simpler: check the highlighted squares â€” the last move was made by the opposite color
       const highlighted = (boardEl.shadowRoot || boardEl).querySelectorAll('[class*="highlight"]');
       // fallback: keep 'w'
     }
@@ -2360,7 +2149,7 @@ function fenFromPieces() {
   return fen;
 }
 
-// ── Stockfish eval API ────────────────────────────────────────
+// â”€â”€ Stockfish eval API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 let evalAbortController = null;
 const evalCache = new Map();
 let evalRequestSeq = 0;
@@ -2587,7 +2376,7 @@ async function fetchEval(fen) {
     return normalizeTopMoves(collected);
   };
 
-  // Primary: stockfish.online — real Stockfish engine, depth 15
+  // Primary: stockfish.online â€” real Stockfish engine, depth 15
   try {
     const baseStockfishUrl = (depth) =>
       `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${depth}&multiPv=4`;
@@ -2673,7 +2462,7 @@ async function fetchEval(fen) {
   return null;
 }
 
-// ── Bar rendering ─────────────────────────────────────────────
+// â”€â”€ Bar rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function extractUciMove(text) {
   if (typeof text !== 'string') return null;
   const match = text.match(/\b([a-h][1-8][a-h][1-8][qrbn]?)\b/i);
@@ -2712,7 +2501,7 @@ function getBoardElement() {
 function _detectOrientationColor(boardEl) {
   if (!boardEl) return null;
 
-  // ── 1. HTML attribute (most explicit — chess.com sets orientation="black" for live games) ──
+  // â”€â”€ 1. HTML attribute (most explicit â€” chess.com sets orientation="black" for live games) â”€â”€
   const orientAttr = (
     boardEl.getAttribute?.('orientation') ||
     boardEl.getAttribute?.('data-orientation') ||
@@ -2721,14 +2510,14 @@ function _detectOrientationColor(boardEl) {
   if (orientAttr === 'black' || orientAttr === 'b') return 'b';
   if (orientAttr === 'white' || orientAttr === 'w') return 'w';
 
-  // ── 2. JS property (wc-chess-board is a Web Component — the Lit property may differ from attribute) ──
+  // â”€â”€ 2. JS property (wc-chess-board is a Web Component â€” the Lit property may differ from attribute) â”€â”€
   try {
     const orientProp = (typeof boardEl.orientation === 'string') ? boardEl.orientation.toLowerCase() : null;
     if (orientProp === 'black' || orientProp === 'b') return 'b';
     if (orientProp === 'white' || orientProp === 'w') return 'w';
   } catch {}
 
-  // ── 3. Player/my color properties on the element or its game object ──
+  // â”€â”€ 3. Player/my color properties on the element or its game object â”€â”€
   try {
     for (const src of [boardEl, boardEl.game, boardEl.controller].filter(Boolean)) {
       for (const key of ['myColor', 'playerColor', 'mySide', 'playerSide', 'userColor', 'localColor']) {
@@ -2741,28 +2530,28 @@ function _detectOrientationColor(boardEl) {
     }
   } catch {}
 
-  // ── 4. Boolean flipped property ──
+  // â”€â”€ 4. Boolean flipped property â”€â”€
   try {
     if (boardEl.flipped === true)  return 'b';
     if (boardEl.flipped === false) return 'w';
   } catch {}
 
-  // ── 5. flipped HTML attribute ──
+  // â”€â”€ 5. flipped HTML attribute â”€â”€
   const flippedAttr = boardEl.getAttribute?.('flipped');
   if (flippedAttr === '' || flippedAttr === 'true') return 'b';
   if (flippedAttr === 'false') return 'w';
 
-  // ── 6. CSS class ──
+  // â”€â”€ 6. CSS class â”€â”€
   if (
     boardEl.classList?.contains('board-flipped') ||
     document.querySelector('.flipped-board, [class*="board-flipped"]')
   ) return 'b';
 
-  // ── 7. White king visual position — most reliable visual indicator ──────────
+  // â”€â”€ 7. White king visual position â€” most reliable visual indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // On chess.com the local player's pieces are always at the bottom (the board
   // flips when playing black). So:
-  //   white king in BOTTOM half of board → white is at bottom → player is WHITE
-  //   white king in TOP half of board    → white is at top   → player is BLACK (flipped board)
+  //   white king in BOTTOM half of board â†’ white is at bottom â†’ player is WHITE
+  //   white king in TOP half of board    â†’ white is at top   â†’ player is BLACK (flipped board)
   // This works regardless of whether orientation/flipped attributes are set.
   try {
     let boardRect;
@@ -2781,8 +2570,8 @@ function _detectOrientationColor(boardEl) {
           try { er = el.getBoundingClientRect(); } catch { continue; }
           if (!er || er.width === 0 || er.height === 0) continue;
           const cy = er.top + er.height / 2;
-          // White king below midpoint → white at bottom → playing white
-          // White king above midpoint → white at top → playing black (flipped)
+          // White king below midpoint â†’ white at bottom â†’ playing white
+          // White king above midpoint â†’ white at top â†’ playing black (flipped)
           const detected = cy > midY ? 'w' : 'b';
           playerSideCache = { side: detected, ts: now() };
           return detected;
@@ -2791,7 +2580,7 @@ function _detectOrientationColor(boardEl) {
     }
   } catch {}
 
-  // ── 8. Board coordinate labels ───────────────────────────────────────────
+  // â”€â”€ 8. Board coordinate labels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Search both regular DOM and the board's shadow root (chess.com renders
   // rank/file labels inside the web component's shadow root).
   const coordColor = detectOrientationFromBoardCoordinates(boardEl);
@@ -2876,7 +2665,7 @@ function clearBestMoveOverlay() {
   hideBestMoveOverlay();
 }
 
-// ── Who am I? ─────────────────────────────────────────────────
+// â”€â”€ Who am I? â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function getLoggedInUsername() {
   // 1. chess.com global objects
   try {
@@ -3015,7 +2804,7 @@ function syncBestMoveOverlay() {
   overlay.style.height = window.innerHeight + 'px';
   svg.setAttribute('viewBox', `0 0 ${window.innerWidth} ${window.innerHeight}`);
 
-  // Always blue — it's always MY move when we reach this point
+  // Always blue â€” it's always MY move when we reach this point
   drawArrow(svg, 'cse-my-line', 'cse-my-start',
             startPt.x, startPt.y, endPt.x, endPt.y, startPt.cell);
   hideArrow(svg, 'cse-opp-line', 'cse-opp-start');
@@ -3030,7 +2819,7 @@ function setBestMove(bestMove) {
 
 function cpToWhitePct(cp) {
   // cp is raw centipawns (e.g. 50 = half pawn). Sigmoid tuned to cp units.
-  // ±300cp = slight/moderate advantage, ±800cp ≈ decisive
+  // Â±300cp = slight/moderate advantage, Â±800cp â‰ˆ decisive
   const pct = 50 + 50 * (2 / (1 + Math.exp(-cp / 200)) - 1);
   return Math.max(2, Math.min(98, pct));
 }
@@ -4048,56 +3837,9 @@ function injectEvalToggleButton() {
   evalToggleBtn = btn;
 }
 
-// ─── Inject Buttons ───────────────────────────────────────────────────────────
+// â”€â”€â”€ Inject Buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function addStatsButton(usernameEl, username) {
-  if (!username || injectedUsernameEls.has(usernameEl)) return;
-  injectedUsernameEls.add(usernameEl);
-
-  const btn = document.createElement('button');
-  btn.className = 'cse-btn';
-  btn.title = `Mostra statistiche di ${username}`;
-  btn.textContent = '📈';
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    e.preventDefault();
-    loadStatsForUser(username);
-  });
-  usernameEl.style.position = 'relative';
-  usernameEl.appendChild(btn);
-}
-
-function extractUsername(el) {
-  // Try data attributes first
-  const user = el.dataset.username || el.dataset.user || el.getAttribute('data-player-username');
-  if (user) return user.toLowerCase();
-  // Fallback: text content (strip whitespace/icons)
-  const text = el.textContent.trim().split(/\s/)[0];
-  return text.length > 2 ? text.toLowerCase() : null;
-}
-
-function scanAndInject() {
-  // Selectors for player name elements across chess.com pages
-  const selectors = [
-    '[data-username]',
-    '.user-username-component',
-    '.player-tagline-username',
-    '.cc-user-display-name',
-    '.username',
-    '.game-over-username-component',
-    '.lobby-player-username',
-    '.opponents-username'
-  ];
-
-  for (const sel of selectors) {
-    document.querySelectorAll(sel).forEach(el => {
-      const username = extractUsername(el);
-      if (username) addStatsButton(el, username);
-    });
-  }
-}
-
-// ─── Observer ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Observer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function scanAndInjectEval() {
   // Only show eval button if a chess board is visible on the page
@@ -4112,17 +3854,15 @@ function scanAndInjectEval() {
 window.addEventListener('resize', syncBestMoveOverlay);
 window.addEventListener('scroll', syncBestMoveOverlay, true);
 
-document.addEventListener('keydown', e => {
-  if (e.key === 'Shift' && e.location === 2) {
-    toggleToolsGui();
-  }
-});
-
 const observer = new MutationObserver(() => {
-  scanAndInject();
-  scanAndInjectEval();
-  syncBestMoveOverlay();
-  if (isGuiHudEnabled && (!guiHudPanel || !guiHudPanel.isConnected)) syncGuiHudPanel();
+  try {
+    window.CSEStatsCheater?.scanAndInject?.();
+    window.CSEEvalTools?.scanAndInjectEval?.();
+    syncBestMoveOverlay();
+    if (isGuiHudEnabled && (!guiHudPanel || !guiHudPanel.isConnected)) syncGuiHudPanel();
+  } catch (err) {
+    console.error('[CSE] observer tick failed', err);
+  }
 });
 observer.observe(document.body, { childList: true, subtree: true });
 applySavedGuiAndModuleState();
@@ -4132,8 +3872,8 @@ if (isAutoPlayEnabled) startAutoPlayTicker();
 syncGuiHudPanel();
 ensureEvalEngineState(true);
 cseSaveState();
-scanAndInject();
-scanAndInjectEval();
+window.CSEStatsCheater?.scanAndInject?.();
+window.CSEEvalTools?.scanAndInjectEval?.();
 
 // Re-scan on navigation (SPA)
 let lastUrl = location.href;
@@ -4150,7 +3890,8 @@ new MutationObserver(() => {
     lastEvalMoveSourceFen = null;
     clearPremoveSchedule();
     clearAutoPlaySchedule(true);
+    window.CSEAutoModules?.onUrlChanged?.();
     if (isAutoPlayEnabled) performAutoPlayTick();
-    setTimeout(scanAndInject, 1000);
+    setTimeout(() => window.CSEStatsCheater?.scanAndInject?.(), 1000);
   }
 }).observe(document, { subtree: true, childList: true });
