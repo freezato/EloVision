@@ -2891,6 +2891,7 @@ const cseGuiState = {
   activeTab: 'ALL',
   favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
+  settingsSection: 'stockfish',
 };
 
 function applySavedGuiAndModuleState() {
@@ -3146,6 +3147,7 @@ function cseRenderGui() {
   });
 
   const grid = modal.querySelector('#cse-mc-grid');
+  grid.className = 'cse-mc-grid';
   grid.innerHTML = '';
 
   if (tab === 'SETTINGS') {
@@ -3157,24 +3159,92 @@ function cseRenderGui() {
     const noFenFor = stockfishNoFenSinceAt ? formatAgo(stockfishNoFenSinceAt) : '-';
     const lastSuccess = formatAgo(stockfishLastSuccessAt);
     const lastReload = formatAgo(stockfishLastReloadAt);
+    const sfStatus = stockfishFailureStreak === 0 ? 'Healthy' : 'Degraded';
+    const sfStatusClass = stockfishFailureStreak === 0 ? 'cse-sf-status-ok' : 'cse-sf-status-err';
+    const activeSettingsSection = cseGuiState.settingsSection || 'stockfish';
 
+    const SVG_SF    = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
+    const SVG_GEN   = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+    const SVG_APP   = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>`;
+    const SVG_NOTIF = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`;
+    const SVG_ABOUT = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
+    const SVG_SFBIG = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
+    const SVG_RLD   = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
+
+    grid.className = 'cse-mc-settings-layout';
     grid.innerHTML = `
-      <div class="cse-mc-settings-card">
-        <div class="cse-mc-settings-title">Stockfish</div>
-        <label class="cse-mc-check cse-mc-settings-check">
-          <input type="checkbox" id="cse-stockfish-auto-reload" ${stockfishAutoReloadEnabled ? 'checked' : ''}>
-          <span>Auto reload every 10s when eval is stuck</span>
-        </label>
-        <button class="cse-mc-settings-btn" id="cse-stockfish-reload-now">Reload Stockfish now</button>
-        <div class="cse-mc-settings-status">
-          <div>Failure streak: <b>${stockfishFailureStreak}</b></div>
-          <div>Failing for: <b>${failureFor}</b></div>
-          <div>No position for: <b>${noFenFor}</b></div>
-          <div>Last eval success: <b>${lastSuccess}</b></div>
-          <div>Last reload: <b>${lastReload}</b></div>
+      <div class="cse-mc-settings-sidebar">
+        <div class="cse-mc-ss-item ${activeSettingsSection === 'stockfish' ? 'cse-mc-ss-active' : ''}" data-section="stockfish">
+          <div class="cse-mc-ss-icon" style="background:rgba(74,158,92,0.13);color:#4a9e5c;">${SVG_SF}</div>
+          <div class="cse-mc-ss-text"><div class="cse-mc-ss-title">Stockfish</div><div class="cse-mc-ss-sub">Engine settings</div></div>
+        </div>
+        <div class="cse-mc-ss-item ${activeSettingsSection === 'general' ? 'cse-mc-ss-active' : ''}" data-section="general">
+          <div class="cse-mc-ss-icon" style="background:rgba(155,155,187,0.1);color:#9b9bbb;">${SVG_GEN}</div>
+          <div class="cse-mc-ss-text"><div class="cse-mc-ss-title">General</div><div class="cse-mc-ss-sub">Application settings</div></div>
+        </div>
+        <div class="cse-mc-ss-item ${activeSettingsSection === 'appearance' ? 'cse-mc-ss-active' : ''}" data-section="appearance">
+          <div class="cse-mc-ss-icon" style="background:rgba(91,143,201,0.12);color:#5b8fc9;">${SVG_APP}</div>
+          <div class="cse-mc-ss-text"><div class="cse-mc-ss-title">Appearance</div><div class="cse-mc-ss-sub">Theme and UI</div></div>
+        </div>
+        <div class="cse-mc-ss-item ${activeSettingsSection === 'notifications' ? 'cse-mc-ss-active' : ''}" data-section="notifications">
+          <div class="cse-mc-ss-icon" style="background:rgba(201,164,74,0.12);color:#c9a44a;">${SVG_NOTIF}</div>
+          <div class="cse-mc-ss-text"><div class="cse-mc-ss-title">Notifications</div><div class="cse-mc-ss-sub">Alerts and sounds</div></div>
+        </div>
+        <div class="cse-mc-ss-item ${activeSettingsSection === 'about' ? 'cse-mc-ss-active' : ''}" data-section="about">
+          <div class="cse-mc-ss-icon" style="background:rgba(140,140,140,0.1);color:#888;">${SVG_ABOUT}</div>
+          <div class="cse-mc-ss-text"><div class="cse-mc-ss-title">About</div><div class="cse-mc-ss-sub">Version and credits</div></div>
         </div>
       </div>
+      <div class="cse-mc-settings-content" id="cse-settings-content">
+        ${activeSettingsSection === 'stockfish' ? `
+          <div class="cse-mc-sc-header">
+            <div class="cse-mc-sc-icon" style="background:rgba(74,158,92,0.15);color:#4a9e5c;">${SVG_SFBIG}</div>
+            <span class="cse-mc-sc-title">Stockfish</span>
+            <span class="cse-mc-sc-badge cse-mc-sc-enabled">Enabled</span>
+            <div style="flex:1"></div>
+            <span class="cse-mc-sc-info" title="Info">${SVG_ABOUT}</span>
+          </div>
+          <label class="cse-mc-sc-check-row">
+            <input type="checkbox" id="cse-stockfish-auto-reload" ${stockfishAutoReloadEnabled ? 'checked' : ''} style="accent-color:#4a9e5c;width:15px;height:15px;flex-shrink:0;margin-top:1px;">
+            <div>
+              <div class="cse-mc-sc-check-label">Auto reload every 10s when eval is stuck</div>
+              <div class="cse-mc-sc-check-sub">If Stockfish stops responding or evaluation gets stuck, it will be reloaded automatically.</div>
+            </div>
+          </label>
+          <button class="cse-mc-sc-reload-btn" id="cse-stockfish-reload-now">
+            ${SVG_RLD} Reload Stockfish now
+          </button>
+          <div class="cse-mc-sc-section-title">Statistics</div>
+          <div class="cse-mc-sc-stats-grid">
+            <div class="cse-mc-sc-stat"><div class="cse-mc-sc-stat-icon" style="background:rgba(74,158,92,0.12);color:#4a9e5c;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></div><div class="cse-mc-sc-stat-label">Failure streak</div><div class="cse-mc-sc-stat-val">${stockfishFailureStreak}</div></div>
+            <div class="cse-mc-sc-stat"><div class="cse-mc-sc-stat-icon" style="background:rgba(211,84,84,0.12);color:#d35454;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><div class="cse-mc-sc-stat-label">Failing for</div><div class="cse-mc-sc-stat-val">${failureFor}</div></div>
+            <div class="cse-mc-sc-stat"><div class="cse-mc-sc-stat-icon" style="background:rgba(201,164,74,0.12);color:#c9a44a;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div><div class="cse-mc-sc-stat-label">No position for</div><div class="cse-mc-sc-stat-val">${noFenFor}</div></div>
+            <div class="cse-mc-sc-stat"><div class="cse-mc-sc-stat-icon" style="background:rgba(155,100,200,0.12);color:#a070d0;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div><div class="cse-mc-sc-stat-label">Last eval success</div><div class="cse-mc-sc-stat-val">${lastSuccess}</div></div>
+            <div class="cse-mc-sc-stat"><div class="cse-mc-sc-stat-icon" style="background:rgba(91,143,201,0.12);color:#5b8fc9;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></div><div class="cse-mc-sc-stat-label">Last reload</div><div class="cse-mc-sc-stat-val">${lastReload}</div></div>
+            <div class="cse-mc-sc-stat"><div class="cse-mc-sc-stat-icon" style="background:rgba(74,158,92,0.12);color:#4a9e5c;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></div><div class="cse-mc-sc-stat-label">Status</div><div class="cse-mc-sc-stat-val ${sfStatusClass}">${sfStatus}</div></div>
+          </div>
+          <div class="cse-mc-sc-section-title">Advanced</div>
+          <label class="cse-mc-sc-adv-row">
+            <input type="checkbox" id="cse-stockfish-clear-hash" checked style="accent-color:#4a9e5c;width:15px;height:15px;flex-shrink:0;">
+            <div>
+              <div class="cse-mc-sc-check-label">Clear hash on reload</div>
+              <div class="cse-mc-sc-check-sub">Clears the engine hash table when Stockfish is reloaded</div>
+            </div>
+            <span class="cse-mc-sc-arrow">›</span>
+          </label>
+          <div class="cse-mc-sc-footer">${SVG_ABOUT} Changes are applied automatically.</div>
+        ` : `
+          <div style="display:flex;align-items:center;justify-content:center;height:200px;color:#444;font-size:13px;">No settings available for this section.</div>
+        `}
+      </div>
     `;
+
+    grid.querySelectorAll('.cse-mc-ss-item').forEach(item => {
+      item.addEventListener('click', () => {
+        cseGuiState.settingsSection = item.dataset.section;
+        cseRenderGui();
+      });
+    });
 
     const autoCb = grid.querySelector('#cse-stockfish-auto-reload');
     const reloadBtn = grid.querySelector('#cse-stockfish-reload-now');
@@ -3208,18 +3278,51 @@ function cseRenderGui() {
     card.className = 'cse-mc-card';
 
     const iconMap = {
-      AutoMove: { letter: 'A', color: '#4a9e5c' },
-      PuzzleRush: { letter: 'P', color: '#d35454' },
-      AutoPlay: { letter: 'R', color: '#4ac0a8' },
-      SuggestMove: { letter: 'S', color: '#5b8fc9' },
-      EvaluationBar: { letter: 'E', color: '#b58a4a' },
-      GUI: { letter: 'G', color: '#d8d8d8' },
+      AutoMove: {
+        color: '#4a9e5c', bg: 'rgba(74,158,92,0.15)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`
+      },
+      PuzzleRush: {
+        color: '#d35454', bg: 'rgba(211,84,84,0.15)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="1"/><rect x="14" y="2" width="8" height="8" rx="1"/><rect x="2" y="14" width="8" height="8" rx="1"/><path d="M14 17h2a2 2 0 0 0 2-2v-1a1 1 0 0 1 1-1h1a2 2 0 0 0 0-4h-1a1 1 0 0 1-1-1v-1a2 2 0 0 0-2-2h-2v4a1 1 0 0 0 1 1h1a1 1 0 0 1 0 2h-1a1 1 0 0 0-1 1v4z"/></svg>`
+      },
+      AutoPlay: {
+        color: '#4ac0a8', bg: 'rgba(74,192,168,0.13)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>`
+      },
+      SuggestMove: {
+        color: '#5b8fc9', bg: 'rgba(91,143,201,0.15)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>`
+      },
+      EvaluationBar: {
+        color: '#c9a44a', bg: 'rgba(201,164,74,0.13)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`
+      },
+      CheaterFinder: {
+        color: '#b58a4a', bg: 'rgba(181,138,74,0.13)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`
+      },
+      GUI: {
+        color: '#9b9bbb', bg: 'rgba(155,155,187,0.12)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="3" y1="9" x2="9" y2="9"/></svg>`
+      },
     };
-    const icon = iconMap[mod.id] || { letter: '?', color: '#888' };
+    const descMap = {
+      AutoMove: 'Automatic best moves',
+      PuzzleRush: 'Solve puzzles faster',
+      AutoPlay: 'Play full games automatically',
+      SuggestMove: 'Suggest the best moves',
+      EvaluationBar: 'Show position evaluation',
+      CheaterFinder: 'Detect engine assistance',
+      GUI: 'Customize interface',
+    };
+    const icon = iconMap[mod.id] || { color: '#888', bg: 'rgba(136,136,136,0.12)', svg: '?' };
+    const desc = descMap[mod.id] || '';
+    const isRunning = mod.active && (mod.id === 'AutoPlay' || mod.id === 'AutoMove' || mod.id === 'PuzzleRush');
 
     card.innerHTML = `
       <div class="cse-mc-card-top">
-        <div class="cse-mc-icon" style="color:${icon.color};">${icon.letter}</div>
+        <div class="cse-mc-icon" style="color:${icon.color};background:${icon.bg};">${icon.svg}</div>
         <div class="cse-mc-card-controls">
           <div class="cse-mc-toggle ${mod.active ? 'cse-mc-on' : ''}" data-id="${mod.id}">
             <div class="cse-mc-knob"></div>
@@ -3230,6 +3333,8 @@ function cseRenderGui() {
         </div>
       </div>
       <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' && isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-automove"></span>' : ''}${mod.id === 'PuzzleRush' && isPuzzleRushEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-puzzlerush"></span>' : ''}${mod.id === 'AutoPlay' && isAutoPlayEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-autoplay"></span>' : ''}</div>
+      <div class="cse-mc-card-desc">${desc}</div>
+      ${isRunning ? '<div class="cse-mc-running"><span class="cse-mc-running-dot"></span>Running</div>' : ''}
       <div class="cse-mc-fav ${isFav ? 'cse-mc-fav-on' : ''}" data-id="${mod.id}" title="${isFav ? 'Remove from favorites' : 'Add to favorites'}">&#9733;</div>
     `;
 
@@ -3632,16 +3737,18 @@ function createToolsGui() {
   const modal = document.createElement('div');
   modal.id = 'cse-mc-gui';
   modal.className = 'cse-mc-gui';
+  const SVG_ALL = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="0" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/></svg>`;
+  const SVG_FAV = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2l2.9 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l7.1-1.01L12 2z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>`;
+  const SVG_SETTINGS = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>`;
+
   modal.innerHTML = `
-    <div class="cse-mc-titlebar" id="cse-mc-drag">
-      <div style="flex:1"></div>
+    <div class="cse-mc-header" id="cse-mc-drag">
+      <div class="cse-mc-tabs">
+        <button class="cse-mc-tab" data-tab="ALL" style="color:#fff;border-bottom:2px solid #4a9e5c;">${SVG_ALL} ALL</button>
+        <button class="cse-mc-tab" data-tab="FAVORITE" style="color:#555;border-bottom:2px solid transparent;">${SVG_FAV} FAVORITE</button>
+        <button class="cse-mc-tab" data-tab="SETTINGS" style="color:#555;border-bottom:2px solid transparent;">${SVG_SETTINGS} SETTINGS</button>
+      </div>
       <button class="cse-mc-close-btn" id="cse-mc-close">&#10005;</button>
-    </div>
-    <div class="cse-mc-tabs">
-      <button class="cse-mc-tab" data-tab="ALL" style="color:#fff;border-bottom:2px solid #4a9e5c;font-weight:600;">ALL</button>
-      <button class="cse-mc-tab" data-tab="FAVORITE" style="color:#666;border-bottom:2px solid transparent;">FAVORITE</button>
-      <button class="cse-mc-tab" data-tab="SETTINGS" style="color:#666;border-bottom:2px solid transparent;">SETTINGS</button>
-      <div style="flex:1"></div>
     </div>
     <div class="cse-mc-grid" id="cse-mc-grid"></div>
     <div id="cse-mc-settings-overlay" class="cse-mc-settings-overlay" style="display:none;"></div>
@@ -3688,6 +3795,7 @@ function createToolsGui() {
   handle.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
     if (e.target.closest('#cse-mc-close')) return;
+    if (e.target.closest('.cse-mc-tab')) return;
     e.preventDefault();
 
     const r = modal.getBoundingClientRect();
