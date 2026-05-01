@@ -83,9 +83,11 @@
     if (!header) return;
     let startX, startY, startLeft, startTop;
     header.addEventListener('mousedown', e => {
+      if (e.target.classList.contains('cse-close')) return;
       startX = e.clientX; startY = e.clientY;
       const rect = el.getBoundingClientRect();
       startLeft = rect.left; startTop = rect.top;
+      el.style.right = 'auto';
       function onMove(ev){ el.style.left = (startLeft + ev.clientX - startX) + 'px'; el.style.top = (startTop + ev.clientY - startY) + 'px'; }
       function onUp(){ document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); }
       document.addEventListener('mousemove', onMove);
@@ -93,12 +95,20 @@
     });
   }
 
+  const BOLT_SVG = `<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
+  const TROPHY_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4a2 2 0 0 1-2-2V5a1 1 0 0 1 1-1h2"/><path d="M18 9h2a2 2 0 0 0 2-2V5a1 1 0 0 0-1-1h-2"/><path d="M12 17v4"/><path d="M8 21h8"/><path d="M6 9a6 6 0 0 0 12 0V4H6v5z"/></svg>`;
+  const USER_SVG = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+  const TARGET_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>`;
+
   function createPanel(username){
     const panel = document.createElement('div');
     panel.className = 'cse-panel';
     panel.innerHTML = `
       <div class="cse-header">
-        <span class="cse-title">♟ <a href="https://www.chess.com/member/${username}" target="_blank">${username}</a></span>
+        <div class="cse-header-left">
+          <div class="cse-avatar-icon">${USER_SVG}</div>
+          <span class="cse-title"><a href="https://www.chess.com/member/${username}" target="_blank">${username}</a></span>
+        </div>
         <button class="cse-close" title="Chiudi">✕</button>
       </div>
       <div class="cse-loading"><div class="cse-spinner"></div><span>Caricamento statistiche...</span></div>
@@ -114,17 +124,53 @@
   function renderStats(panel, username, stats1, stats7, stats30, playerStats){
     const { peak, peakMode } = getPeakRating(playerStats);
     const currentRatings = getCurrentRating(playerStats);
-    const ratingHTML = Object.entries(currentRatings).map(([mode, rating]) => `<span class="cse-badge">${mode}: <b>${rating}</b></span>`).join('');
-    const peakHTML = peak > 0 ? `<span class="cse-badge cse-peak">🏆 Peak ${peakMode}: <b>${peak}</b></span>` : '';
+
+    const modeLabel = { rapid: 'Rapid', blitz: 'Blitz', bullet: 'Bullet' };
+    const ratingHTML = Object.entries(currentRatings).map(([mode, rating]) =>
+      `<span class="cse-badge"><span class="cse-badge-bolt">${BOLT_SVG}</span>${modeLabel[mode] || mode}: <b>${rating}</b></span>`
+    ).join('');
+    const peakHTML = peak > 0
+      ? `<span class="cse-badge cse-peak"><span class="cse-badge-trophy">${TROPHY_SVG}</span>Peak ${peakMode}: <b>${peak}</b></span>`
+      : '';
+
     const periodRow = (label, data) => {
       const pct = data.total > 0 ? Math.round((data.wins / data.total) * 100) : 0;
-      return `<tr><td class="cse-period">${label}</td><td class="cse-w">✅ ${data.wins}</td><td class="cse-l">❌ ${data.losses}</td><td class="cse-d">🤝 ${data.draws}</td><td class="cse-wlr">${data.wlr}</td><td class="cse-pct">${data.total > 0 ? pct + '%' : '—'}</td></tr>`;
+      const wlrColor = parseFloat(data.wlr) >= 1.5 ? 'cse-wlr-high' : parseFloat(data.wlr) >= 1 ? 'cse-wlr-mid' : '';
+      const pctColor = pct >= 55 ? 'cse-pct-high' : pct >= 50 ? 'cse-pct-mid' : 'cse-pct-low';
+      return `<tr>
+        <td class="cse-period">${label}</td>
+        <td class="cse-w"><span class="cse-icon-check">✔</span> ${data.wins}</td>
+        <td class="cse-l"><span class="cse-icon-x">✘</span> ${data.losses}</td>
+        <td class="cse-d"><span class="cse-icon-shield">🛡</span> ${data.draws}</td>
+        <td class="cse-wlr ${wlrColor}">${data.wlr}</td>
+        <td class="cse-pct ${pctColor}">${data.total > 0 ? pct + '%' : '—'}</td>
+      </tr>`;
     };
+
     const content = panel.querySelector('.cse-content');
     content.innerHTML = `
       <div class="cse-ratings">${ratingHTML}${peakHTML}</div>
-      <table class="cse-table"><thead><tr><th>Periodo</th><th title="Vittorie">✅</th><th title="Sconfitte">❌</th><th title="Patte">🤝</th><th title="Win/Loss Ratio">WLR</th><th title="Win Rate">Win%</th></tr></thead><tbody>${periodRow('1 giorno', stats1)}${periodRow('7 giorni', stats7)}${periodRow('30 giorni', stats30)}</tbody></table>
-      <div class="cse-footer">Dati via chess.com API · <span class="cse-time">${new Date().toLocaleTimeString('it-IT')}</span></div>
+      <table class="cse-table">
+        <thead>
+          <tr>
+            <th>PERIODO</th>
+            <th title="Vittorie"><span class="cse-th-win">✔</span></th>
+            <th title="Sconfitte"><span class="cse-th-loss">✘</span></th>
+            <th title="Patte"><span class="cse-th-draw">🛡</span></th>
+            <th title="Win/Loss Ratio">WLR</th>
+            <th title="Win Rate">WIN%</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${periodRow('1 giorno', stats1)}
+          ${periodRow('7 giorni', stats7)}
+          ${periodRow('30 giorni', stats30)}
+        </tbody>
+      </table>
+      <div class="cse-footer">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/></svg>
+        Dati via chess.com API · <span class="cse-time">${new Date().toLocaleTimeString('it-IT')}</span>
+      </div>
     `;
     panel.querySelector('.cse-loading').style.display = 'none';
     content.style.display = 'block';
@@ -208,15 +254,63 @@
     return { ...analysis, ...computeCheaterScore(analysis) };
   }
 
+  function buildRadarSVG(score) {
+    // score 0-100, draw a simple radar/circle fill
+    const cx = 70, cy = 70, r = 52;
+    const pct = Math.min(1, score / 100);
+    const sides = 6;
+    const points = [];
+    for (let i = 0; i < sides; i++) {
+      const angle = (Math.PI * 2 * i / sides) - Math.PI / 2;
+      const rx = cx + r * pct * Math.cos(angle);
+      const ry = cy + r * pct * Math.sin(angle);
+      points.push(`${rx},${ry}`);
+    }
+    // grid lines
+    const grids = [0.33, 0.66, 1].map(frac => {
+      const gpts = [];
+      for (let i = 0; i < sides; i++) {
+        const angle = (Math.PI * 2 * i / sides) - Math.PI / 2;
+        gpts.push(`${cx + r * frac * Math.cos(angle)},${cy + r * frac * Math.sin(angle)}`);
+      }
+      return `<polygon points="${gpts.join(' ')}" fill="none" stroke="rgba(138,92,200,0.18)" stroke-width="1"/>`;
+    }).join('');
+    // spokes
+    const spokes = Array.from({length: sides}, (_, i) => {
+      const angle = (Math.PI * 2 * i / sides) - Math.PI / 2;
+      return `<line x1="${cx}" y1="${cy}" x2="${cx + r * Math.cos(angle)}" y2="${cy + r * Math.sin(angle)}" stroke="rgba(138,92,200,0.15)" stroke-width="1"/>`;
+    }).join('');
+    // filled polygon
+    const fillPoly = `<polygon points="${points.join(' ')}" fill="rgba(138,92,200,0.35)" stroke="rgba(168,112,230,0.8)" stroke-width="1.5"/>`;
+    // skull icon in center (simplified)
+    const skull = `<circle cx="${cx}" cy="${cy}" r="18" fill="rgba(30,20,50,0.9)" stroke="rgba(138,92,200,0.5)" stroke-width="1.5"/>
+      <text x="${cx}" y="${cy+6}" text-anchor="middle" font-size="18" fill="rgba(160,120,220,0.9)">☠</text>`;
+    return `<svg width="140" height="140" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="${cx}" cy="${cy}" r="${r+4}" fill="rgba(20,10,40,0.5)"/>
+      ${grids}${spokes}${fillPoly}${skull}
+    </svg>`;
+  }
+
   function ensureCheaterFinderPanel(){
     let panel = document.getElementById('cse-cheater-panel');
     if (panel) return panel;
     panel = document.createElement('div');
     panel.id = 'cse-cheater-panel';
-    panel.className = 'cse-panel';
-    panel.style.right = '20px';
-    panel.style.top = '140px';
-    panel.innerHTML = `<div class="cse-header"><span class="cse-title">Cheater Finder</span><button class="cse-close" title="Chiudi">✕</button></div><div class="cse-content" style="display:block;padding:10px;"><div id="cse-cheater-body">In attesa utente...</div></div>`;
+    panel.className = 'cse-panel cse-cheater-panel';
+    panel.style.right = '420px';
+    panel.style.top = '80px';
+    panel.innerHTML = `
+      <div class="cse-header cse-cheater-header">
+        <div class="cse-header-left">
+          <div class="cse-cheater-icon-wrap">${TARGET_SVG}</div>
+          <span class="cse-title cse-cheater-title">Cheater Finder</span>
+        </div>
+        <button class="cse-close" title="Chiudi">✕</button>
+      </div>
+      <div class="cse-content cse-cheater-content" style="display:block;padding:14px 16px;">
+        <div id="cse-cheater-body" class="cse-cheater-waiting">In attesa utente...</div>
+      </div>
+    `;
     panel.querySelector('.cse-close').addEventListener('click', () => panel.remove());
     document.body.appendChild(panel);
     makeDraggable(panel);
@@ -231,15 +325,47 @@
 
   async function loadCheaterForUser(username){
     if (!username) return;
-    renderCheaterFinderText(`Analisi <b>${username}</b> in corso...`);
+    renderCheaterFinderText(`<div class="cse-cheater-loading"><div class="cse-spinner"></div><span>Analisi <b>${username}</b>...</span></div>`);
     try {
       const report = await buildCheaterAnalysis(username);
       const pct = (v) => `${Math.round(v * 100)}%`;
       const level = report.score >= 75 ? 'ALTO' : report.score >= 50 ? 'MEDIO' : 'BASSO';
-      const reasons = report.reasons.length ? report.reasons.join(' · ') : 'Nessun segnale forte';
-      renderCheaterFinderText(`<div><b>${username}</b> · Score: <b>${report.score}/100</b> (${level})</div><div>Account age: <b>${report.accountAgeDays}g</b></div><div>Winrate 30g max: <b>${pct(report.maxWinRate30)}</b></div><div>Volume 30g: <b>${report.games30}</b> partite</div><div>Accuracy alta: <b>${report.highAccuracyGames}/${report.accuracyGames || 0}</b> (${pct(report.highAccuracyRatio)})</div><div style="margin-top:6px;opacity:.85;">${reasons}</div>`);
+      const levelClass = report.score >= 75 ? 'cse-level-alto' : report.score >= 50 ? 'cse-level-medio' : 'cse-level-basso';
+      const reasons = report.reasons.length ? report.reasons : ['Nessun segnale forte'];
+
+      const radarSVG = buildRadarSVG(report.score);
+
+      const reasonsHTML = reasons.map(r =>
+        `<span class="cse-reason-pill"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>${r}</span>`
+      ).join(' · ');
+
+      const CAL_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
+      const TREND_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>`;
+      const BAR_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`;
+      const AIM_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>`;
+
+      renderCheaterFinderText(`
+        <div class="cse-cheater-body-inner">
+          <div class="cse-cheater-radar">${radarSVG}</div>
+          <div class="cse-cheater-info">
+            <div class="cse-cheater-username-score">
+              <span class="cse-cheater-uname">${username}</span>
+              <span class="cse-cheater-dot">·</span>
+              <span class="cse-cheater-score-label">Score: <b class="cse-score-val">${report.score}/100</b></span>
+              <span class="cse-level-badge ${levelClass}">${level}</span>
+            </div>
+            <div class="cse-cheater-stats-list">
+              <div class="cse-cf-stat">${CAL_SVG} Account age: <b>${report.accountAgeDays}g</b></div>
+              <div class="cse-cf-stat">${TREND_SVG} Winrate 30g max: <b>${pct(report.maxWinRate30)}</b></div>
+              <div class="cse-cf-stat">${BAR_SVG} Volume 30g: <b>${report.games30}</b> partite</div>
+              <div class="cse-cf-stat">${AIM_SVG} Accuracy alta: <b>${report.highAccuracyGames}/${report.accuracyGames || 0}</b> (${pct(report.highAccuracyRatio)})</div>
+            </div>
+          </div>
+        </div>
+        <div class="cse-cheater-reasons">${reasonsHTML}</div>
+      `);
     } catch (err) {
-      renderCheaterFinderText(`Errore analisi per <b>${username}</b>.`);
+      renderCheaterFinderText(`<span class="cse-error">Errore analisi per <b>${username}</b>.</span>`);
       console.error('[CheaterFinder]', err);
     }
   }
