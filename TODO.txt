@@ -7,3 +7,5 @@
 
 
 [] Engine lento a pensare.
+[] Aggiungere animazioni per la chiusura della gui.
+[] Aggiungere animazioni per l'attivazione dei moduli

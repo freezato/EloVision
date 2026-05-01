@@ -187,7 +187,7 @@
       const cutoff7 = daysAgo(7), cutoff1 = daysAgo(1);
       const games7 = games30.filter(g => g.end_time >= cutoff7);
       const games1 = games30.filter(g => g.end_time >= cutoff1);
-      renderStats(panel, username, calcWLR(games1, username), calcWLR(games7, username), calcWLR(games30, username), playerStats);
+      renderStatsAnimated(panel, username, calcWLR(games1, username), calcWLR(games7, username), calcWLR(games30, username), playerStats);
     } catch (err) {
       renderError(panel, `Impossibile caricare le stats per "${username}"`);
       console.error('[ChessStats]', err);
@@ -325,7 +325,7 @@
 
   async function loadCheaterForUser(username){
     if (!username) return;
-    renderCheaterFinderText(`<div class="cse-cheater-loading"><div class="cse-spinner"></div><span>Analisi <b>${username}</b>...</span></div>`);
+    renderCheaterFinderTextAnimated(`<div class="cse-cheater-loading"><div class="cse-spinner"></div><span>Analisi <b>${username}</b>...</span></div>`);
     try {
       const report = await buildCheaterAnalysis(username);
       const pct = (v) => `${Math.round(v * 100)}%`;
@@ -344,7 +344,7 @@
       const BAR_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`;
       const AIM_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>`;
 
-      renderCheaterFinderText(`
+      renderCheaterFinderTextAnimated(`
         <div class="cse-cheater-body-inner">
           <div class="cse-cheater-radar">${radarSVG}</div>
           <div class="cse-cheater-info">
@@ -412,5 +412,160 @@
     }
   }
 
+  /* ── Animation helpers ──────────────────────────────────────── */
+
+  // Animate a numeric text node counting up from 0 to final value
+  function animateCount(el, target, duration = 600, suffix = '') {
+    if (!el || isNaN(target)) return;
+    const start = performance.now();
+    const from = 0;
+    function tick(now) {
+      const t = Math.min((now - start) / duration, 1);
+      // ease-out cubic
+      const ease = 1 - Math.pow(1 - t, 3);
+      el.textContent = Math.round(from + (target - from) * ease) + suffix;
+      if (t < 1) requestAnimationFrame(tick);
+      else el.textContent = target + suffix;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // Run countup on all stat numbers inside a given container
+  function runCountAnimations(container) {
+    if (!container) return;
+    // Table: wins, losses, draws, wlr, pct
+    container.querySelectorAll('.cse-w, .cse-l, .cse-d').forEach(td => {
+      const match = td.textContent.match(/(\d+)/);
+      if (!match) return;
+      const num = parseInt(match[1], 10);
+      const icon = td.querySelector('span');
+      const iconHTML = icon ? icon.outerHTML + ' ' : '';
+      td.innerHTML = iconHTML + '<span class="cse-count-val">' + num + '</span>';
+      const span = td.querySelector('.cse-count-val');
+      animateCount(span, num, 700 + Math.random() * 200);
+    });
+
+    // WLR and WIN% cells
+    container.querySelectorAll('.cse-wlr').forEach(td => {
+      const raw = td.textContent.trim();
+      if (raw === '—' || raw === '∞') return;
+      const num = parseFloat(raw);
+      if (isNaN(num)) return;
+      const start = performance.now();
+      const dur = 800;
+      function tick(now) {
+        const t = Math.min((now - start) / dur, 1);
+        const ease = 1 - Math.pow(1 - t, 3);
+        td.textContent = (num * ease).toFixed(2);
+        if (t < 1) requestAnimationFrame(tick);
+        else td.textContent = raw;
+      }
+      requestAnimationFrame(tick);
+    });
+
+    container.querySelectorAll('.cse-pct').forEach(td => {
+      const raw = td.textContent.trim();
+      if (raw === '—') return;
+      const num = parseInt(raw);
+      if (isNaN(num)) return;
+      const span = document.createElement('span');
+      span.textContent = '0%';
+      td.textContent = '';
+      td.appendChild(span);
+      animateCount(span, num, 750, '%');
+    });
+
+    // Cheater score
+    const scoreEl = container.querySelector('.cse-score-val');
+    if (scoreEl) {
+      const match = scoreEl.textContent.match(/(\d+)/);
+      if (match) {
+        const num = parseInt(match[1]);
+        scoreEl.textContent = '0/100';
+        const s = performance.now();
+        const dur = 900;
+        function tickScore(now) {
+          const t = Math.min((now - s) / dur, 1);
+          const ease = 1 - Math.pow(1 - t, 3);
+          scoreEl.textContent = Math.round(num * ease) + '/100';
+          if (t < 1) requestAnimationFrame(tickScore);
+          else scoreEl.textContent = num + '/100';
+        }
+        requestAnimationFrame(tickScore);
+      }
+    }
+
+    // Account age, volume, accuracy counts
+    container.querySelectorAll('.cse-cf-stat b').forEach(b => {
+      const raw = b.textContent.trim();
+      const match = raw.match(/^(\d+)/);
+      if (!match) return;
+      const num = parseInt(match[1]);
+      const suffix = raw.slice(match[1].length);
+      b.textContent = '0' + suffix;
+      animateCount(b, num, 700, suffix);
+    });
+  }
+
+  // Patch renderStats to trigger countup after DOM insert
+  const _origRenderStats = renderStats;
+  function renderStatsAnimated(panel, username, s1, s7, s30, playerStats) {
+    _origRenderStats(panel, username, s1, s7, s30, playerStats);
+    // Small delay to let the DOM paint first
+    setTimeout(() => runCountAnimations(panel.querySelector('.cse-content')), 80);
+  }
+
+  // Patch renderCheaterFinderText to trigger countup after final result
+  const _origRenderCheaterText = renderCheaterFinderText;
+  function renderCheaterFinderTextAnimated(html) {
+    _origRenderCheaterText(html);
+    const panel = document.getElementById('cse-cheater-panel');
+    if (!panel) return;
+    // Only run countup when body has the full result layout
+    if (html && html.includes('cse-cheater-body-inner')) {
+      setTimeout(() => runCountAnimations(panel.querySelector('#cse-cheater-body')), 80);
+      // Animate radar polygon drawing
+      setTimeout(() => animateRadarPolygon(panel), 100);
+    }
+  }
+
+  // Animate radar polygon fill from 0 to final
+  function animateRadarPolygon(container) {
+    const svg = container && container.querySelector('.cse-cheater-radar svg');
+    if (!svg) return;
+    const poly = svg.querySelector('polygon:last-of-type');
+    if (!poly) return;
+    const finalPoints = poly.getAttribute('points');
+    if (!finalPoints) return;
+    const cx = 70, cy = 70;
+    // Parse target points
+    const pts = finalPoints.trim().split(' ').map(p => {
+      const [x, y] = p.split(',').map(Number);
+      return { x, y };
+    });
+    const start = performance.now();
+    const dur = 900;
+    function tick(now) {
+      const t = Math.min((now - start) / dur, 1);
+      const ease = 1 - Math.pow(1 - t, 3);
+      const animated = pts.map(p => {
+        const nx = cx + (p.x - cx) * ease;
+        const ny = cy + (p.y - cy) * ease;
+        return `${nx.toFixed(2)},${ny.toFixed(2)}`;
+      });
+      poly.setAttribute('points', animated.join(' '));
+      if (t < 1) requestAnimationFrame(tick);
+      else poly.setAttribute('points', finalPoints);
+    }
+    // Start with zero-sized polygon
+    const zeroPts = pts.map(() => `${cx},${cy}`).join(' ');
+    poly.setAttribute('points', zeroPts);
+    requestAnimationFrame(tick);
+  }
+
   window.CSEStatsCheater = { scanAndInject };
+
+  // Override with animated versions (defined after the original functions)
+  window._cseRenderStats = renderStatsAnimated;
+  window._cseRenderCheaterText = renderCheaterFinderTextAnimated;
 })();
