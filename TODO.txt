@@ -3,9 +3,8 @@
 [DONE] Rendere la legit mode di AutoMove molto piu' legit e umana;
 [DONE] Sistemare autoplay non funzionante + aggiungere opzione "Accetta rivincite se richieste";
 [DONE] Aggiungere Cheater Finder: Crea un modulo "Cheater Finder" che: Rileva l’username dell’avversario quando inizia una partita Recupera dati tramite API pubbliche di Chess.com Analizza i dati Restituisce uno score di probabilità cheating da 1 a 100 Logica di rilevamento Devi implementare queste metriche: 1. Account age Giorni dalla creazione account Account molto recenti = più sospetti 2. Winrate Winrate totale per modalità (rapid/blitz/bullet) Winrate ultimi 30 giorni Regole: 55% = sospetto 70% = altamente sospetto Considera numero partite (evita falsi positivi con pochi game) 3. Volume di partite Numero di partite giocate negli ultimi 30 giorni Alto volume + alto winrate = red flag 4. Accuratezza partite Percentuale di partite con alta accuracy: 80% se rating <1500 90% se rating ≥1500 Molte partite con accuracy alta = sospetto Calcolo score (IMPORTANTE) Crea una funzione che restituisce un valore 1–100 basato su pesi: Esempio logica (migliorala se vuoi): Account nuovo (<30 giorni): +20 Winrate >55%: +15 Winrate >70%: +30 Molte partite (>100) + winrate alto: +20 Alta accuracy frequente: +30 Normalizza il risultato a 100.
+[DONE] Stockfish in locale.
 ------------------------
 
-
-[] Engine lento a pensare (soprattutto nei puzzles) - Provare ad aggiungere stockfish in locale se è una buona opzione.
 [] Aggiungere animazioni per la chiusura della gui.
 [] Aggiungere animazioni per l'attivazione dei moduli

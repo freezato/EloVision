@@ -27,6 +27,12 @@
       "run_at": "document_idle"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["modules/stockfish/*"],
+      "matches": ["https://www.chess.com/*"]
+    }
+  ],
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",

@@ -43,6 +43,10 @@ let lastEvalTopMoves = [];
 let lastEvalPvLines = [];
 let lastEvalMate = null;
 let stockfishAutoReloadEnabled = false;
+let stockfishProvider = 'local'; // 'local' | 'api'
+let generalLanguage = 'en'; // 'en' | 'it'
+let generalNumbersFormat = 'default'; // 'default' | 'eu'
+let generalMinimizeToTray = true;
 let evalBarDisplayMode = 'bar'; // 'bar' | 'percent'
 let stockfishFailureStreak = 0;
 let stockfishFailureSinceAt = 0;
@@ -77,6 +81,9 @@ const STOCKFISH_AUTO_RELOAD_INTERVAL_MS = 10 * 1000;
 const EVAL_TICK_FAST_MS = 180;
 const EVAL_TICK_NORMAL_MS = 1000;
 const STOCKFISH_TIMEOUT_FAST_MS = 780;
+const STOCKFISH_LOCAL_BOOT_TIMEOUT_MS = 9000;
+const STOCKFISH_LOCAL_MULTI_PV = 4;
+const STOCKFISH_LOCAL_SCRIPT_PATH = 'modules/stockfish/stockfish.js';
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -104,6 +111,7 @@ function cseSaveState() {
       GUI: !!isGuiHudEnabled,
     },
     settings: {
+      stockfishProvider,
       automoveMode,
       automoveDelayMin,
       automoveDelayMax,
@@ -115,6 +123,9 @@ function cseSaveState() {
       stockfishAutoReloadEnabled,
       autoPlayAcceptRematch,
       evalBarDisplayMode,
+      generalLanguage,
+      generalNumbersFormat,
+      generalMinimizeToTray,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -2158,6 +2169,264 @@ let evalRequestSeq = 0;
 let puzzleRushPositionStartedAt = 0;
 let puzzleRushPositionKey = null;
 let puzzleRushFallbackDepth = null;
+let localStockfishWorker = null;
+let localStockfishWorkerBlobUrl = null;
+let localStockfishInitPromise = null;
+let localStockfishSearchId = 0;
+let localStockfishCurrentSearch = null;
+
+function isLocalStockfishProvider() {
+  return stockfishProvider === 'local';
+}
+
+function clearLocalStockfishSearch(result = null, { aborted = false } = {}) {
+  const search = localStockfishCurrentSearch;
+  if (!search || search.done) return;
+  search.done = true;
+  if (search.timeoutId) clearTimeout(search.timeoutId);
+  if (search.signal && search.abortHandler) {
+    try { search.signal.removeEventListener('abort', search.abortHandler); } catch {}
+  }
+  localStockfishCurrentSearch = null;
+  if (aborted) search.reject(makeAbortError());
+  else search.resolve(result);
+}
+
+function releaseLocalStockfishEngine() {
+  if (localStockfishWorker) {
+    try {
+      localStockfishWorker.removeEventListener('message', onLocalStockfishMessage);
+      localStockfishWorker.removeEventListener('error', onLocalStockfishError);
+    } catch {}
+    try { localStockfishWorker.postMessage('quit'); } catch {}
+    try { localStockfishWorker.terminate(); } catch {}
+  }
+  localStockfishWorker = null;
+
+  if (localStockfishWorkerBlobUrl) {
+    try { URL.revokeObjectURL(localStockfishWorkerBlobUrl); } catch {}
+    localStockfishWorkerBlobUrl = null;
+  }
+
+  if (localStockfishCurrentSearch && !localStockfishCurrentSearch.done) {
+    clearLocalStockfishSearch(null);
+  }
+}
+
+function parseLocalStockfishInfoLine(line, linesByPv) {
+  if (typeof line !== 'string' || !line.startsWith('info ')) return;
+  if (!/\bscore\s+(?:cp|mate)\s+-?\d+/.test(line)) return;
+  if (!/\bpv\s+/.test(line)) return;
+  if (/\blowerbound\b/.test(line) || /\bupperbound\b/.test(line)) return;
+
+  const depthMatch = line.match(/\bdepth\s+(\d+)/);
+  const pvMatch = line.match(/\bpv\s+(.+)$/);
+  const cpMatch = line.match(/\bscore\s+cp\s+(-?\d+)/);
+  const mateMatch = line.match(/\bscore\s+mate\s+(-?\d+)/);
+  if (!pvMatch) return;
+
+  const pvMoves = pvMatch[1].trim().split(/\s+/).map(extractUciMove).filter(Boolean);
+  if (!pvMoves.length) return;
+
+  const rawPv = parseInt((line.match(/\bmultipv\s+(\d+)/) || [])[1] || '1', 10);
+  const multipv = Number.isFinite(rawPv)
+    ? Math.max(1, Math.min(STOCKFISH_LOCAL_MULTI_PV, rawPv))
+    : 1;
+  const depth = Number.isFinite(parseInt(depthMatch?.[1] || '0', 10))
+    ? parseInt(depthMatch?.[1] || '0', 10)
+    : 0;
+
+  const next = {
+    depth,
+    cp: cpMatch ? parseInt(cpMatch[1], 10) : null,
+    mate: mateMatch ? parseInt(mateMatch[1], 10) : null,
+    moves: pvMoves,
+  };
+  const prev = linesByPv.get(multipv);
+  if (!prev || next.depth >= prev.depth) linesByPv.set(multipv, next);
+}
+
+function buildLocalStockfishResult(turn, bestMove, linesByPv) {
+  const perspective = turn === 'b' ? -1 : 1;
+  const lines = Array.from(linesByPv.entries())
+    .sort((a, b) => a[0] - b[0])
+    .slice(0, STOCKFISH_LOCAL_MULTI_PV)
+    .map(([pv, data]) => ({ pv, ...data }));
+
+  const primary = lines.find(line => line.pv === 1) || lines[0] || null;
+  const normalizedBestMove = extractUciMove(bestMove || '') || primary?.moves?.[0] || null;
+  if (!normalizedBestMove) return null;
+
+  const topMoves = Array.from(new Set([
+    normalizedBestMove,
+    ...lines.map(line => line.moves?.[0]).filter(Boolean),
+  ])).slice(0, 4);
+
+  const pvLines = lines.map(line => ({
+    moves: (line.moves || []).slice(0, 12),
+    cp: Number.isFinite(line.cp) ? line.cp * perspective : null,
+    mate: Number.isFinite(line.mate) ? line.mate * perspective : null,
+  }));
+
+  const cp = primary && Number.isFinite(primary.cp) ? primary.cp * perspective : null;
+  const mate = primary && Number.isFinite(primary.mate) ? primary.mate * perspective : null;
+  if (!Number.isFinite(cp) && !Number.isFinite(mate)) return null;
+  return {
+    cp,
+    mate,
+    bestMove: normalizedBestMove,
+    topMoves,
+    pvLines,
+  };
+}
+
+function onLocalStockfishMessage(event) {
+  const line = String(event?.data || '').trim();
+  const search = localStockfishCurrentSearch;
+  if (!search || search.done || !line) return;
+
+  if (line.startsWith('info ')) {
+    parseLocalStockfishInfoLine(line, search.linesByPv);
+    return;
+  }
+
+  if (line.startsWith('bestmove ')) {
+    const bestMove = extractUciMove(line);
+    const result = buildLocalStockfishResult(search.turn, bestMove, search.linesByPv);
+    clearLocalStockfishSearch(result);
+  }
+}
+
+function onLocalStockfishError() {
+  clearLocalStockfishSearch(null);
+  releaseLocalStockfishEngine();
+}
+
+function ensureLocalStockfishEngine() {
+  if (localStockfishWorker) return Promise.resolve(localStockfishWorker);
+  if (localStockfishInitPromise) return localStockfishInitPromise;
+
+  localStockfishInitPromise = (async () => {
+    const scriptUrl = chrome.runtime.getURL(STOCKFISH_LOCAL_SCRIPT_PATH);
+    const res = await fetch(scriptUrl);
+    if (!res.ok) throw new Error(`local-stockfish-script-${res.status}`);
+    const source = await res.text();
+    if (!source || source.length < 2000) throw new Error('local-stockfish-script-empty');
+
+    const blob = new Blob([source], { type: 'text/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    const worker = new Worker(blobUrl);
+    localStockfishWorker = worker;
+    localStockfishWorkerBlobUrl = blobUrl;
+
+    await new Promise((resolve, reject) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('local-stockfish-init-timeout'));
+      }, STOCKFISH_LOCAL_BOOT_TIMEOUT_MS);
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        try { worker.removeEventListener('message', onInitMessage); } catch {}
+        try { worker.removeEventListener('error', onInitError); } catch {}
+      };
+
+      const onInitError = () => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('local-stockfish-init-error'));
+      };
+
+      const onInitMessage = (evt) => {
+        const text = String(evt?.data || '').trim();
+        if (text === 'uciok') {
+          try { worker.postMessage('isready'); } catch (err) { onInitError(err); }
+          return;
+        }
+        if (text === 'readyok') {
+          if (done) return;
+          done = true;
+          cleanup();
+          resolve();
+        }
+      };
+
+      worker.addEventListener('message', onInitMessage);
+      worker.addEventListener('error', onInitError);
+      worker.postMessage('uci');
+    });
+
+    worker.addEventListener('message', onLocalStockfishMessage);
+    worker.addEventListener('error', onLocalStockfishError);
+    return worker;
+  })().catch((err) => {
+    releaseLocalStockfishEngine();
+    throw err;
+  }).finally(() => {
+    localStockfishInitPromise = null;
+  });
+
+  return localStockfishInitPromise;
+}
+
+async function runLocalStockfishEval(fen, queryDepth, signal) {
+  const worker = await ensureLocalStockfishEngine();
+  if (!worker) return null;
+
+  if (localStockfishCurrentSearch && !localStockfishCurrentSearch.done) {
+    try { worker.postMessage('stop'); } catch {}
+    clearLocalStockfishSearch(null);
+  }
+
+  const turn = fen.split(' ')[1] || 'w';
+  const timeoutMs = (isAutomoveEnabled || isPuzzleRushEnabled)
+    ? Math.max(1000, STOCKFISH_TIMEOUT_FAST_MS + 420)
+    : Math.max(2200, queryDepth * 170);
+
+  return new Promise((resolve, reject) => {
+    const search = {
+      id: ++localStockfishSearchId,
+      done: false,
+      turn,
+      linesByPv: new Map(),
+      timeoutId: 0,
+      signal,
+      abortHandler: null,
+      resolve,
+      reject,
+    };
+    localStockfishCurrentSearch = search;
+
+    search.timeoutId = setTimeout(() => {
+      try { worker.postMessage('stop'); } catch {}
+      clearLocalStockfishSearch(null);
+    }, timeoutMs);
+
+    if (signal) {
+      search.abortHandler = () => {
+        try { worker.postMessage('stop'); } catch {}
+        clearLocalStockfishSearch(null, { aborted: true });
+      };
+      if (signal.aborted) {
+        search.abortHandler();
+        return;
+      }
+      signal.addEventListener('abort', search.abortHandler, { once: true });
+    }
+
+    try {
+      worker.postMessage(`setoption name MultiPV value ${STOCKFISH_LOCAL_MULTI_PV}`);
+      worker.postMessage(`position fen ${fen}`);
+      worker.postMessage(`go depth ${queryDepth}`);
+    } catch (err) {
+      clearLocalStockfishSearch(null);
+    }
+  });
+}
 
 function getEvalFenCacheToken(fen) {
   if (typeof fen !== 'string') return String(fen || '');
@@ -2377,87 +2646,106 @@ async function fetchEval(fen) {
     addFrom(payload?.continuation);
     return normalizeTopMoves(collected);
   };
+  const allowApiFallback = stockfishProvider === 'api' || stockfishProvider === 'local';
 
-  // Primary: stockfish.online â€” real Stockfish engine, depth 15
-  try {
-    const baseStockfishUrl = (depth) =>
-      `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${depth}&multiPv=4`;
-    const url = baseStockfishUrl(queryDepth);
-    const stockfishTimeoutMs = fastEvalMode ? STOCKFISH_TIMEOUT_FAST_MS : 0;
-    const res = await withTimeout(
-      fetchJsonWithStatus(url, {
-        signal,
-        timeoutMs: stockfishTimeoutMs,
-        abortKey: 'eval-stockfish'
-      }),
-      stockfishTimeoutMs ? stockfishTimeoutMs + 150 : 0
-    );
-    if (res.ok) {
-      const data = res.data;
-      if (data.success) {
-        const bestMove = extractUciMove(data.bestmove);
-        let topMoves = extractStockfishMoves(data, bestMove);
+  if (isLocalStockfishProvider()) {
+    try {
+      const localResult = await runLocalStockfishEval(fen, queryDepth, signal);
+      if (localResult) {
+        setCachedEval(fen, queryDepth, localResult);
+        registerEvalSuccess();
+        return localResult;
+      }
+    } catch (e) {
+      if (e?.name === 'AbortError') return null;
+      releaseLocalStockfishEngine();
+    }
+  } else {
+    releaseLocalStockfishEngine();
+  }
 
-        // In legit mode we need more than one candidate often, but probing is expensive.
-        // Keep it for non-automove analysis only to avoid move latency.
-        const shouldProbeExtra =
-          !isAutomoveEnabled &&
-          !isPuzzleRushEnabled &&
-          automoveMode === 'legit' &&
-          !isPuzzleContext();
-        if (shouldProbeExtra && topMoves.length < 3) {
-          const probeDepths = Array.from(new Set([
-            Math.max(6, queryDepth - 2),
-            Math.max(6, queryDepth - 5),
-            Math.max(6, queryDepth - 8),
-          ])).filter(d => d !== queryDepth);
+  if (allowApiFallback) {
+    // stockfish.online fallback (or explicit API provider)
+    try {
+      const baseStockfishUrl = (depth) =>
+        `https://stockfish.online/api/s/v2.php?fen=${encodeURIComponent(fen)}&depth=${depth}&multiPv=4`;
+      const url = baseStockfishUrl(queryDepth);
+      const stockfishTimeoutMs = fastEvalMode ? STOCKFISH_TIMEOUT_FAST_MS : 0;
+      const res = await withTimeout(
+        fetchJsonWithStatus(url, {
+          signal,
+          timeoutMs: stockfishTimeoutMs,
+          abortKey: 'eval-stockfish'
+        }),
+        stockfishTimeoutMs ? stockfishTimeoutMs + 150 : 0
+      );
+      if (res.ok) {
+        const data = res.data;
+        if (data.success) {
+          const bestMove = extractUciMove(data.bestmove);
+          let topMoves = extractStockfishMoves(data, bestMove);
 
-          for (const depth of probeDepths) {
-            if (signal.aborted || topMoves.length >= 4) break;
-            try {
-              const probeRes = await fetchJsonWithStatus(baseStockfishUrl(depth), {
-                signal,
-                abortKey: 'eval-stockfish'
-              });
-              if (!probeRes?.ok || !probeRes?.data?.success) continue;
-              const probeMove = extractUciMove(probeRes.data.bestmove);
-              topMoves = normalizeTopMoves([...topMoves, probeMove]);
-            } catch (probeErr) {
-              if (probeErr?.name === 'AbortError') throw probeErr;
+          // In legit mode we need more than one candidate often, but probing is expensive.
+          // Keep it for non-automove analysis only to avoid move latency.
+          const shouldProbeExtra =
+            !isAutomoveEnabled &&
+            !isPuzzleRushEnabled &&
+            automoveMode === 'legit' &&
+            !isPuzzleContext();
+          if (shouldProbeExtra && topMoves.length < 3) {
+            const probeDepths = Array.from(new Set([
+              Math.max(6, queryDepth - 2),
+              Math.max(6, queryDepth - 5),
+              Math.max(6, queryDepth - 8),
+            ])).filter(d => d !== queryDepth);
+
+            for (const depth of probeDepths) {
+              if (signal.aborted || topMoves.length >= 4) break;
+              try {
+                const probeRes = await fetchJsonWithStatus(baseStockfishUrl(depth), {
+                  signal,
+                  abortKey: 'eval-stockfish'
+                });
+                if (!probeRes?.ok || !probeRes?.data?.success) continue;
+                const probeMove = extractUciMove(probeRes.data.bestmove);
+                topMoves = normalizeTopMoves([...topMoves, probeMove]);
+              } catch (probeErr) {
+                if (probeErr?.name === 'AbortError') throw probeErr;
+              }
             }
           }
-        }
 
-        if (data.mate !== null && data.mate !== undefined && data.mate !== 0) {
-          const result = {
-            cp: null,
-            mate: turn === 'w' ? data.mate : -data.mate,
-            bestMove,
-            topMoves,
-            pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: null, mate: idx === 0 ? data.mate : null }))
-          };
-          setCachedEval(fen, queryDepth, result);
-          registerEvalSuccess();
-          return result;
-        }
-        const cpRaw = Math.round(parseFloat(data.evaluation) * 100);
-        const cp = turn === 'w' ? cpRaw : -cpRaw;
-        if (!isNaN(cp)) {
-          const result = {
-            cp,
-            mate: null,
-            bestMove,
-            topMoves,
-            pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: idx === 0 ? cp : null, mate: null }))
-          };
-          setCachedEval(fen, queryDepth, result);
-          registerEvalSuccess();
-          return result;
+          if (data.mate !== null && data.mate !== undefined && data.mate !== 0) {
+            const result = {
+              cp: null,
+              mate: turn === 'w' ? data.mate : -data.mate,
+              bestMove,
+              topMoves,
+              pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: null, mate: idx === 0 ? data.mate : null }))
+            };
+            setCachedEval(fen, queryDepth, result);
+            registerEvalSuccess();
+            return result;
+          }
+          const cpRaw = Math.round(parseFloat(data.evaluation) * 100);
+          const cp = turn === 'w' ? cpRaw : -cpRaw;
+          if (!isNaN(cp)) {
+            const result = {
+              cp,
+              mate: null,
+              bestMove,
+              topMoves,
+              pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: idx === 0 ? cp : null, mate: null }))
+            };
+            setCachedEval(fen, queryDepth, result);
+            registerEvalSuccess();
+            return result;
+          }
         }
       }
+    } catch (e) {
+      if (e?.name === 'AbortError') return null; // newer position superseded this one
     }
-  } catch (e) {
-    if (e.name === 'AbortError') return null; // newer position superseded this one
   }
 
   registerEvalFailure();
@@ -2845,7 +3133,7 @@ function updateEvalBarDisplay(result) {
         scoreEl.textContent = '?';
         scoreEl.className = 'cse-eval-score';
       }
-      evalBarPanel.title = 'Eval non disponibile (posizione non trovata o API non raggiungibile)';
+      evalBarPanel.title = 'Eval non disponibile (posizione non trovata o engine non raggiungibile)';
     }
     return;
   }
@@ -2894,7 +3182,7 @@ const cseGuiState = {
   activeTab: 'ALL',
   favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
-  settingsSection: 'stockfish',
+  settingsSection: 'general',
 };
 
 function applySavedGuiAndModuleState() {
@@ -2927,6 +3215,9 @@ function applySavedGuiAndModuleState() {
   }
 
   if (saved.settings && typeof saved.settings === 'object') {
+    if (saved.settings.stockfishProvider === 'local' || saved.settings.stockfishProvider === 'api') {
+      stockfishProvider = saved.settings.stockfishProvider;
+    }
     if (saved.settings.automoveMode === 'legit' || saved.settings.automoveMode === 'blatant') automoveMode = saved.settings.automoveMode;
     if (Number.isFinite(saved.settings.automoveDelayMin)) automoveDelayMin = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMin)));
     if (Number.isFinite(saved.settings.automoveDelayMax)) automoveDelayMax = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMax)));
@@ -2941,6 +3232,13 @@ function applySavedGuiAndModuleState() {
     if (saved.settings.evalBarDisplayMode === 'percent' || saved.settings.evalBarDisplayMode === 'bar') {
       evalBarDisplayMode = saved.settings.evalBarDisplayMode;
     }
+    if (saved.settings.generalLanguage === 'en' || saved.settings.generalLanguage === 'it') {
+      generalLanguage = saved.settings.generalLanguage;
+    }
+    if (saved.settings.generalNumbersFormat === 'default' || saved.settings.generalNumbersFormat === 'eu') {
+      generalNumbersFormat = saved.settings.generalNumbersFormat;
+    }
+    generalMinimizeToTray = saved.settings.generalMinimizeToTray !== false;
   }
 }
 
@@ -2984,6 +3282,7 @@ function reloadStockfishConnection(reason = 'manual-ui', forceTick = true) {
     try { evalAbortController.abort(); } catch {}
     evalAbortController = null;
   }
+  releaseLocalStockfishEngine();
   evalCache.clear();
   evalRequestSeq++;
   clearAutomoveSchedule();
@@ -3032,6 +3331,7 @@ function stopEvalEngine() {
     clearInterval(evalUpdateInterval);
     evalUpdateInterval = null;
   }
+  releaseLocalStockfishEngine();
   evalTickIntervalMs = 0;
   resetStockfishFailureTracking();
   clearPuzzleRushDepthFallback();
@@ -3167,7 +3467,9 @@ function cseRenderGui() {
     const lastReload = formatAgo(stockfishLastReloadAt);
     const sfStatus = stockfishFailureStreak === 0 ? 'Healthy' : 'Degraded';
     const sfStatusClass = stockfishFailureStreak === 0 ? 'cse-sf-status-ok' : 'cse-sf-status-err';
-    const activeSettingsSection = cseGuiState.settingsSection || 'stockfish';
+    const activeSettingsSection = cseGuiState.settingsSection || 'general';
+    const isLocalProvider = stockfishProvider === 'local';
+    const providerLabel = isLocalProvider ? 'Local' : 'API';
 
     const SVG_SF    = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
     const SVG_GEN   = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
@@ -3176,6 +3478,11 @@ function cseRenderGui() {
     const SVG_ABOUT = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
     const SVG_SFBIG = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
     const SVG_RLD   = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
+    const SVG_PC    = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2.2"/><path d="M8 20h8"/><path d="M10 16v4"/><path d="M14 16v4"/></svg>`;
+    const SVG_CLOUD = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .62-7.95A6 6 0 0 0 6.1 9.5 4.5 4.5 0 0 0 7 18z"/><path d="M10 18v-4"/><path d="M14 18v-4"/></svg>`;
+    const SVG_LANG  = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18"/><path d="M12 3a14 14 0 0 0 0 18"/></svg>`;
+    const SVG_NUM   = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M9 4v16"/><path d="M15 4v16"/></svg>`;
+    const SVG_TRAY  = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 12h8"/><path d="M9 16h6"/></svg>`;
 
     grid.className = 'cse-mc-settings-layout';
     grid.innerHTML = `
@@ -3206,7 +3513,7 @@ function cseRenderGui() {
           <div class="cse-mc-sc-header">
             <div class="cse-mc-sc-icon" style="background:rgba(74,158,92,0.15);color:#4a9e5c;">${SVG_SFBIG}</div>
             <span class="cse-mc-sc-title">Stockfish</span>
-            <span class="cse-mc-sc-badge cse-mc-sc-enabled">Enabled</span>
+            <span class="cse-mc-sc-badge cse-mc-sc-enabled">${providerLabel}</span>
             <div style="flex:1"></div>
             <span class="cse-mc-sc-info" title="Info">${SVG_ABOUT}</span>
           </div>
@@ -3239,6 +3546,95 @@ function cseRenderGui() {
             <span class="cse-mc-sc-arrow">›</span>
           </label>
           <div class="cse-mc-sc-footer">${SVG_ABOUT} Changes are applied automatically.</div>
+        ` : activeSettingsSection === 'general' ? `
+          <div class="cse-gs-page">
+            <div class="cse-gs-header">
+              <div class="cse-gs-title">General</div>
+              <div class="cse-gs-subtitle">Configure general application settings</div>
+            </div>
+
+            <div class="cse-gs-block">
+              <div class="cse-gs-block-kicker">ENGINE PROVIDER</div>
+              <div class="cse-gs-block-desc">Choose how Stockfish is used to analyze positions.</div>
+              <div class="cse-gs-provider-grid">
+                <button class="cse-gs-provider-card ${isLocalProvider ? 'cse-gs-provider-active' : ''}" data-provider="local" type="button">
+                  <span class="cse-gs-provider-radio" aria-hidden="true"></span>
+                  <span class="cse-gs-provider-body">
+                    <span class="cse-gs-provider-head">
+                      <span class="cse-gs-provider-icon">${SVG_PC}</span>
+                      <span class="cse-gs-provider-title">Local Stockfish</span>
+                      <span class="cse-gs-provider-tag">Recommended</span>
+                    </span>
+                    <span class="cse-gs-provider-copy">Run Stockfish locally on your device.<br>No internet required.</span>
+                  </span>
+                </button>
+                <button class="cse-gs-provider-card ${!isLocalProvider ? 'cse-gs-provider-active' : ''}" data-provider="api" type="button">
+                  <span class="cse-gs-provider-radio" aria-hidden="true"></span>
+                  <span class="cse-gs-provider-body">
+                    <span class="cse-gs-provider-head">
+                      <span class="cse-gs-provider-icon">${SVG_CLOUD}</span>
+                      <span class="cse-gs-provider-title">Stockfish via API</span>
+                    </span>
+                    <span class="cse-gs-provider-copy">Use a remote Stockfish engine via API.<br>Requires internet connection.</span>
+                  </span>
+                </button>
+              </div>
+              <div class="cse-gs-note">
+                <span class="cse-gs-note-icon">i</span>
+                <span>You can change this at any time. Some features may behave differently depending on the provider.</span>
+              </div>
+            </div>
+
+            <div class="cse-gs-block">
+              <div class="cse-gs-block-kicker">GENERAL OPTIONS</div>
+              <div class="cse-gs-row">
+                <div class="cse-gs-row-left">
+                  <span class="cse-gs-row-icon">${SVG_LANG}</span>
+                  <span>
+                    <span class="cse-gs-row-title">Language</span>
+                    <span class="cse-gs-row-sub">Choose the application language.</span>
+                  </span>
+                </div>
+                <select id="cse-general-language" class="cse-gs-select">
+                  <option value="en" ${generalLanguage === 'en' ? 'selected' : ''}>English</option>
+                  <option value="it" ${generalLanguage === 'it' ? 'selected' : ''}>Italiano</option>
+                </select>
+              </div>
+              <div class="cse-gs-row">
+                <div class="cse-gs-row-left">
+                  <span class="cse-gs-row-icon">${SVG_NUM}</span>
+                  <span>
+                    <span class="cse-gs-row-title">Numbers format</span>
+                    <span class="cse-gs-row-sub">Choose how numbers are formatted.</span>
+                  </span>
+                </div>
+                <select id="cse-general-numbers" class="cse-gs-select">
+                  <option value="default" ${generalNumbersFormat === 'default' ? 'selected' : ''}>Default (1,234.56)</option>
+                  <option value="eu" ${generalNumbersFormat === 'eu' ? 'selected' : ''}>European (1.234,56)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="cse-gs-block">
+              <div class="cse-gs-block-kicker">BEHAVIOR</div>
+              <div class="cse-gs-row cse-gs-row-behavior">
+                <div class="cse-gs-row-left">
+                  <span class="cse-gs-row-icon">${SVG_TRAY}</span>
+                  <span>
+                    <span class="cse-gs-row-title">Minimize to tray</span>
+                    <span class="cse-gs-row-sub">Close button minimizes the application to the system tray.</span>
+                  </span>
+                </div>
+                <label class="cse-gs-switch">
+                  <input type="checkbox" id="cse-general-minimize-tray" ${generalMinimizeToTray ? 'checked' : ''}>
+                  <span class="cse-gs-switch-track"></span>
+                  <span class="cse-gs-switch-knob"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="cse-gs-footer">${SVG_RLD} Changes are applied automatically.</div>
+          </div>
         ` : `
           <div style="display:flex;align-items:center;justify-content:center;height:200px;color:#444;font-size:13px;">No settings available for this section.</div>
         `}
@@ -3266,6 +3662,43 @@ function cseRenderGui() {
         reloadStockfishConnection('manual-ui', true);
         cseSaveState();
         cseRenderGui();
+      });
+    }
+
+    grid.querySelectorAll('.cse-gs-provider-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const provider = card.dataset.provider === 'api' ? 'api' : 'local';
+        if (provider === stockfishProvider) return;
+        const previousProvider = stockfishProvider;
+        stockfishProvider = provider;
+        console.info(`[CSE] Stockfish provider switched: ${previousProvider} -> ${provider}`);
+        reloadStockfishConnection('provider-change', true);
+        cseSaveState();
+        cseRenderGui();
+      });
+    });
+
+    const languageSelect = grid.querySelector('#cse-general-language');
+    if (languageSelect) {
+      languageSelect.addEventListener('change', () => {
+        generalLanguage = languageSelect.value === 'it' ? 'it' : 'en';
+        cseSaveState();
+      });
+    }
+
+    const numbersSelect = grid.querySelector('#cse-general-numbers');
+    if (numbersSelect) {
+      numbersSelect.addEventListener('change', () => {
+        generalNumbersFormat = numbersSelect.value === 'eu' ? 'eu' : 'default';
+        cseSaveState();
+      });
+    }
+
+    const minimizeTrayCb = grid.querySelector('#cse-general-minimize-tray');
+    if (minimizeTrayCb) {
+      minimizeTrayCb.addEventListener('change', () => {
+        generalMinimizeToTray = !!minimizeTrayCb.checked;
+        cseSaveState();
       });
     }
 

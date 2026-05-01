@@ -31,7 +31,9 @@ Automated move execution powered by Stockfish evaluation:
 - **Smart premoves**: queues premoves in tactically forced positions
 
 ### 📡 Stockfish Evaluation Bar
-Real-time position evaluation using the [Stockfish Online API](https://stockfish.online):
+Real-time position evaluation with selectable engine provider:
+- **Local Stockfish** (default): runs directly in-browser via bundled worker
+- **Stockfish Online API** fallback/alternative provider
 - Floating, draggable evaluation bar
 - Displays score in **centipawns** or **percentage** (configurable)
 - Top-move arrows overlaid directly on the board
@@ -123,13 +125,16 @@ All settings are accessible through the **Tools GUI** and are automatically pers
 | `Puzzle Rush Depth` | Stockfish depth for puzzle solving (default: 20) |
 | `Eval Bar Display` | `bar` or `percent` |
 | `Stockfish Auto-Reload` | Auto-restart engine on failure |
+| `Engine Provider` | `local` (default) or `api` |
+| `General Language` | `English` or `Italiano` |
+| `Numbers Format` | `Default (1,234.56)` or `European (1.234,56)` |
 
 ---
 
 ## 🧠 How It Works
 
 - **FEN Extraction**: Reads the current board position by scanning the DOM for `chess-board`, `wc-chess-board`, `[data-fen]`, and move list `[data-ply]` attributes, then reconstructs a valid FEN string including castling rights and turn.
-- **Stockfish Integration**: Sends FEN positions to the [Stockfish Online REST API](https://stockfish.online) with a configurable depth. Results are cached for 12 seconds to avoid redundant requests.
+- **Stockfish Integration**: Uses local bundled Stockfish by default and can switch to the [Stockfish Online REST API](https://stockfish.online). Results are cached for 12 seconds to avoid redundant requests.
 - **Stats API**: Fetches data from the public [Chess.com API](https://api.chess.com) (`/pub/player/{username}/stats` and `/games/archives`). All responses are cached in-memory for 5 minutes.
 - **SPA Navigation**: A `MutationObserver` on `document` watches for URL changes and resets all state (eval cache, move overlays, premove schedules) on navigation.
 - **State Persistence**: Module states, settings, and eval bar position are serialized to `localStorage` under the key `cse_mod_state_v1` and restored on page load.
@@ -158,6 +163,7 @@ This extension is built for **educational and personal use only**. Using automat
 
 - Vanilla JavaScript (ES2020+), no build step required
 - Chrome Extension Manifest v3
+- Bundled Stockfish.js worker (local engine)
 - [Stockfish Online API](https://stockfish.online)
 - [Chess.com Public API](https://www.chess.com/news/view/published-data-api)
 
