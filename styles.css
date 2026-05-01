@@ -1807,6 +1807,26 @@
   animation: cse-gui-in 0.25s ease both;
 }
 
+@keyframes cse-gui-out {
+  0%   { opacity: 1; filter: blur(0); }
+  100% { opacity: 0; filter: blur(3px); }
+}
+
+.cse-mc-gui.cse-mc-gui-closing {
+  pointer-events: none;
+  animation: cse-gui-out 0.18s ease both;
+}
+
+@keyframes cse-module-activate {
+  0% { box-shadow: 0 0 0 rgba(74,158,92,0); }
+  35% { box-shadow: 0 0 0 2px rgba(74,158,92,0.34), 0 8px 24px rgba(74,158,92,0.24); }
+  100% { box-shadow: 0 0 0 rgba(74,158,92,0); }
+}
+
+.cse-mc-card.cse-mc-card-activating {
+  animation: cse-module-activate 0.2s ease-out;
+}
+
 /* Tab active indicator: slide underline */
 .cse-mc-tab {
   position: relative;

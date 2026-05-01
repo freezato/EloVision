@@ -69,8 +69,17 @@ let automoveFastInOpening = false;   // speed up during first 8 full moves
 let automoveUseSmartPremoves = false; // queue premoves in tactical/forced spots
 let isPuzzleRushEnabled = false;
 let isAutoPlayEnabled = false;
+let isToxicChatEnabled = false;
 let puzzleRushDepth = 20;
 let suggestMoveDepth = 15; // depth for SuggestMove/Arrows (user configurable)
+let toxicChatMessage = 'gg ez';
+let toxicChatSendOnStart = false;
+let toxicChatSendOnEnd = true;
+let toxicChatTickInterval = null;
+let toxicChatCurrentGameToken = null;
+let toxicChatSentStartToken = null;
+let toxicChatSentEndToken = null;
+let toxicChatLastSentAt = 0;
 const FEN_SEARCH_MAX_DEPTH = 3;
 const FEN_SEARCH_MAX_NODES = 250;
 const EVAL_CACHE_TTL = 12 * 1000;
@@ -106,6 +115,7 @@ function cseSaveState() {
       AutoMove: !!isAutomoveEnabled,
       PuzzleRush: !!isPuzzleRushEnabled,
       AutoPlay: !!isAutoPlayEnabled,
+      ToxicChat: !!isToxicChatEnabled,
       SuggestMove: !!arrowsEnabled,
       EvaluationBar: !!isEvalBarEnabled,
       GUI: !!isGuiHudEnabled,
@@ -122,6 +132,9 @@ function cseSaveState() {
       suggestMoveDepth,
       stockfishAutoReloadEnabled,
       autoPlayAcceptRematch,
+      toxicChatMessage,
+      toxicChatSendOnStart,
+      toxicChatSendOnEnd,
       evalBarDisplayMode,
       generalLanguage,
       generalNumbersFormat,
@@ -281,6 +294,29 @@ function getFullmoveNumberFromMoveListOnly() {
   const plyCount = getPlyCountFromMoveList();
   if (!Number.isInteger(plyCount) || plyCount < 0) return null;
   return Math.max(1, Math.floor(plyCount / 2) + 1);
+}
+
+function getReliablePlyCount() {
+  const plyFromList = getPlyCountFromMoveList();
+  const hasListPly = Number.isInteger(plyFromList) && plyFromList >= 0;
+
+  let plyFromFen = null;
+  if (typeof lastEvalFen === 'string') {
+    const parts = lastEvalFen.trim().split(/\s+/);
+    const turn = normalizeTurn(parts[1] || '');
+    const fullmove = parseInt(parts[5], 10);
+    if (Number.isInteger(fullmove) && fullmove > 0) {
+      const base = (fullmove - 1) * 2;
+      if (turn === 'w') plyFromFen = Math.max(0, base);
+      if (turn === 'b') plyFromFen = Math.max(0, base + 1);
+    }
+  }
+
+  const hasFenPly = Number.isInteger(plyFromFen) && plyFromFen >= 0;
+  if (hasListPly && hasFenPly) return Math.max(plyFromList, plyFromFen);
+  if (hasListPly) return plyFromList;
+  if (hasFenPly) return plyFromFen;
+  return null;
 }
 
 function findTurnInObject(root, maxDepth = 2, maxNodes = 120) {
@@ -654,6 +690,87 @@ function applyPseudoUciMoveOnBoard(board, move) {
   };
 }
 
+function isInsideBoardIndex(row, col) {
+  return row >= 0 && row <= 7 && col >= 0 && col <= 7;
+}
+
+// Best-effort pseudo-legal move count for a color on a board matrix.
+// It ignores check/pin legality, but is enough to estimate "forced reply" density.
+function countLegalMovesForColor(board, color) {
+  if (!Array.isArray(board) || (color !== 'w' && color !== 'b')) return 0;
+  let count = 0;
+
+  const tryAdd = (row, col, moverColor) => {
+    if (!isInsideBoardIndex(row, col)) return 0;
+    const target = board[row]?.[col] || null;
+    if (!target) return 1;
+    return getPieceColor(target) !== moverColor ? 1 : 0;
+  };
+
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      const piece = board[row]?.[col] || null;
+      if (!piece || getPieceColor(piece) !== color) continue;
+      const lower = piece.toLowerCase();
+
+      if (lower === 'p') {
+        const dir = color === 'w' ? -1 : 1;
+        const startRow = color === 'w' ? 6 : 1;
+        const oneRow = row + dir;
+        if (isInsideBoardIndex(oneRow, col) && !board[oneRow]?.[col]) {
+          count++;
+          const twoRow = row + (2 * dir);
+          if (row === startRow && isInsideBoardIndex(twoRow, col) && !board[twoRow]?.[col]) count++;
+        }
+        const capL = col - 1;
+        const capR = col + 1;
+        if (isInsideBoardIndex(oneRow, capL)) {
+          const t = board[oneRow]?.[capL] || null;
+          if (t && getPieceColor(t) !== color) count++;
+        }
+        if (isInsideBoardIndex(oneRow, capR)) {
+          const t = board[oneRow]?.[capR] || null;
+          if (t && getPieceColor(t) !== color) count++;
+        }
+        continue;
+      }
+
+      if (lower === 'n') {
+        const jumps = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+        for (const [dr, dc] of jumps) count += tryAdd(row + dr, col + dc, color);
+        continue;
+      }
+
+      if (lower === 'k') {
+        const deltas = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+        for (const [dr, dc] of deltas) count += tryAdd(row + dr, col + dc, color);
+        continue;
+      }
+
+      const lines = [];
+      if (lower === 'b' || lower === 'q') lines.push([-1,-1],[-1,1],[1,-1],[1,1]);
+      if (lower === 'r' || lower === 'q') lines.push([-1,0],[1,0],[0,-1],[0,1]);
+      for (const [dr, dc] of lines) {
+        let r = row + dr;
+        let c = col + dc;
+        while (isInsideBoardIndex(r, c)) {
+          const t = board[r]?.[c] || null;
+          if (!t) {
+            count++;
+          } else {
+            if (getPieceColor(t) !== color) count++;
+            break;
+          }
+          r += dr;
+          c += dc;
+        }
+      }
+    }
+  }
+
+  return count;
+}
+
 function isCaptureMoveOnFen(move, fen) {
   if (!move || !fen) return false;
   const mv = splitUciMove(move);
@@ -818,6 +935,10 @@ function autoPlayLog(...args) {
   csePushLog('AutoPlay', args);
 }
 
+function toxicChatLog(...args) {
+  csePushLog('ToxicChat', args);
+}
+
 function clearAutoPlaySchedule(resetHandledToken = false) {
   if (autoPlayTimeout) {
     clearTimeout(autoPlayTimeout);
@@ -846,6 +967,14 @@ function isElementRenderable(el) {
 
 function normalizeActionText(text) {
   return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function escapeHtmlAttr(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function scoreAutoPlayActionText(text) {
@@ -1480,11 +1609,11 @@ function computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, profile = '
     return { minSec, maxSec, reasons, ownClockSec: null };
   }
 
-  const fullmove = getFullmoveNumberFromMoveListOnly();
-  if (automoveFastInOpening && Number.isInteger(fullmove) && fullmove <= 8) {
-    // Keep it fast, but not unrealistically instant (reduces stalled retries).
-    minSec = Math.min(minSec, 0.32);
-    maxSec = Math.min(maxSec, 1.20);
+  const openingPly = getReliablePlyCount();
+  const isOpeningWindow = Number.isInteger(openingPly) && openingPly >= 0 && openingPly <= 15;
+  if (automoveFastInOpening && isOpeningWindow) {
+    minSec = 0.5;
+    maxSec = 1.0;
     reasons.push('opening');
   }
 
@@ -1498,6 +1627,135 @@ function computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, profile = '
   minSec = Math.max(0.15, minSec);
   maxSec = Math.max(minSec, maxSec);
   return { minSec, maxSec, reasons, ownClockSec };
+}
+
+function isGameOverVisible() {
+  const selectors = [
+    '[data-cy*="game-over"]',
+    '[class*="game-over"]',
+    '[class*="post-game"]',
+    '[class*="rematch"]',
+    '[class*="result"]',
+    '[role="dialog"]'
+  ];
+  for (const sel of selectors) {
+    const nodes = Array.from(document.querySelectorAll(sel));
+    if (nodes.some(isElementRenderable)) return true;
+  }
+  return false;
+}
+
+function getToxicChatGameToken() {
+  if (!(isOnlineGameContext() || isComputerGameContext())) return null;
+  if (!getBoardElement()) return null;
+  return String(location.pathname || '');
+}
+
+function getToxicChatInputTarget() {
+  const inputCandidates = Array.from(document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"]'));
+  for (const el of inputCandidates) {
+    if (!isElementRenderable(el)) continue;
+    const text = [
+      el.getAttribute?.('aria-label') || '',
+      el.getAttribute?.('placeholder') || '',
+      el.getAttribute?.('name') || '',
+      el.getAttribute?.('id') || '',
+      el.className || ''
+    ].join(' ').toLowerCase();
+    if (/\b(chat|message|messaggio)\b/.test(text)) return el;
+  }
+  return null;
+}
+
+function submitInputByEnter(el) {
+  const enterDown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true });
+  const enterPress = new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', bubbles: true });
+  const enterUp = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true });
+  el.dispatchEvent(enterDown);
+  el.dispatchEvent(enterPress);
+  el.dispatchEvent(enterUp);
+}
+
+function writeAndSendChatMessage(message) {
+  const msg = String(message || '').trim();
+  if (!msg) return false;
+  const input = getToxicChatInputTarget();
+  if (!input) return false;
+
+  try {
+    input.focus();
+    if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
+      input.value = msg;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      submitInputByEnter(input);
+      return true;
+    }
+    if (input.isContentEditable) {
+      input.textContent = msg;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      submitInputByEnter(input);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function clearToxicChatState() {
+  toxicChatCurrentGameToken = null;
+  toxicChatSentStartToken = null;
+  toxicChatSentEndToken = null;
+}
+
+function performToxicChatTick() {
+  if (!isToxicChatEnabled) return;
+  const gameToken = getToxicChatGameToken();
+  if (!gameToken) {
+    clearToxicChatState();
+    return;
+  }
+
+  if (toxicChatCurrentGameToken !== gameToken) {
+    toxicChatCurrentGameToken = gameToken;
+  }
+
+  const currentMessage = String(toxicChatMessage || '').trim();
+  if (!currentMessage) return;
+
+  const gameOver = isGameOverVisible();
+  const nowTs = now();
+  if ((nowTs - toxicChatLastSentAt) < 4000) return;
+
+  if (toxicChatSendOnStart && !gameOver && toxicChatSentStartToken !== gameToken) {
+    if (writeAndSendChatMessage(currentMessage)) {
+      toxicChatSentStartToken = gameToken;
+      toxicChatLastSentAt = nowTs;
+      toxicChatLog('start sent', { token: gameToken, text: currentMessage });
+    }
+    return;
+  }
+
+  if (toxicChatSendOnEnd && gameOver && toxicChatSentEndToken !== gameToken) {
+    if (writeAndSendChatMessage(currentMessage)) {
+      toxicChatSentEndToken = gameToken;
+      toxicChatLastSentAt = nowTs;
+      toxicChatLog('end sent', { token: gameToken, text: currentMessage });
+    }
+  }
+}
+
+function startToxicChatTicker() {
+  if (toxicChatTickInterval) return;
+  performToxicChatTick();
+  toxicChatTickInterval = setInterval(() => {
+    performToxicChatTick();
+  }, 700);
+}
+
+function stopToxicChatTicker() {
+  if (!toxicChatTickInterval) return;
+  clearInterval(toxicChatTickInterval);
+  toxicChatTickInterval = null;
 }
 
 function updateAutomoveModeUI() {
@@ -3180,7 +3438,7 @@ function updateEvalBarDisplay(result) {
 }
 const cseGuiState = {
   activeTab: 'ALL',
-  favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, SuggestMove: false, EvaluationBar: false, GUI: false },
+  favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, ToxicChat: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
   settingsSection: 'general',
 };
@@ -3195,6 +3453,7 @@ function applySavedGuiAndModuleState() {
       AutoMove: !!saved.favorites.AutoMove,
       PuzzleRush: !!saved.favorites.PuzzleRush,
       AutoPlay: !!saved.favorites.AutoPlay,
+      ToxicChat: !!saved.favorites.ToxicChat,
       SuggestMove: !!saved.favorites.SuggestMove,
       EvaluationBar: !!saved.favorites.EvaluationBar,
       GUI: !!saved.favorites.GUI,
@@ -3209,6 +3468,7 @@ function applySavedGuiAndModuleState() {
     isAutomoveEnabled = !!saved.modules.AutoMove;
     isPuzzleRushEnabled = !!saved.modules.PuzzleRush;
     isAutoPlayEnabled = !!saved.modules.AutoPlay;
+    isToxicChatEnabled = !!saved.modules.ToxicChat;
     arrowsEnabled = !!saved.modules.SuggestMove;
     isEvalBarEnabled = !!saved.modules.EvaluationBar;
     isGuiHudEnabled = !!saved.modules.GUI;
@@ -3229,6 +3489,9 @@ function applySavedGuiAndModuleState() {
     if (Number.isFinite(saved.settings.suggestMoveDepth)) suggestMoveDepth = Math.max(1, Math.min(15, Math.round(saved.settings.suggestMoveDepth)));
     stockfishAutoReloadEnabled = !!saved.settings.stockfishAutoReloadEnabled;
     autoPlayAcceptRematch = saved.settings.autoPlayAcceptRematch !== false;
+    if (typeof saved.settings.toxicChatMessage === 'string') toxicChatMessage = saved.settings.toxicChatMessage;
+    toxicChatSendOnStart = !!saved.settings.toxicChatSendOnStart;
+    toxicChatSendOnEnd = saved.settings.toxicChatSendOnEnd !== false;
     if (saved.settings.evalBarDisplayMode === 'percent' || saved.settings.evalBarDisplayMode === 'bar') {
       evalBarDisplayMode = saved.settings.evalBarDisplayMode;
     }
@@ -3393,6 +3656,7 @@ function getActiveModuleHudEntries() {
       html: `AutoPlay${autoPlayTimer ? ` <span class="cse-gui-hud-timer">${autoPlayTimer}</span>` : ''}`,
     });
   }
+  if (isToxicChatEnabled) entries.push({ key: 'ToxicChat', html: 'ToxicChat' });
   if (arrowsEnabled) entries.push({ key: 'SuggestMove', html: 'SuggestMove' });
   if (isEvalBarEnabled) entries.push({ key: 'EvaluationBar', html: 'EvaluationBar' });
   if (isGuiHudEnabled) entries.push({ key: 'GUI', html: 'GUI' });
@@ -3439,6 +3703,7 @@ function cseRenderGui() {
     { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled, hasSettings: true },
     { id: 'PuzzleRush', label: 'Puzzle Rush', active: isPuzzleRushEnabled, hasSettings: true },
     { id: 'AutoPlay', label: 'AutoPlay', active: isAutoPlayEnabled, hasSettings: true },
+    { id: 'ToxicChat', label: 'Toxic Chat', active: isToxicChatEnabled, hasSettings: true },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
@@ -3729,6 +3994,10 @@ function cseRenderGui() {
         color: '#4ac0a8', bg: 'rgba(74,192,168,0.13)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>`
       },
+      ToxicChat: {
+        color: '#cf5a87', bg: 'rgba(207,90,135,0.14)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>`
+      },
       SuggestMove: {
         color: '#5b8fc9', bg: 'rgba(91,143,201,0.15)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>`
@@ -3750,6 +4019,7 @@ function cseRenderGui() {
       AutoMove: 'Automatic best moves',
       PuzzleRush: 'Solve puzzles faster',
       AutoPlay: 'Play full games automatically',
+      ToxicChat: 'Send auto chat message',
       SuggestMove: 'Suggest the best moves',
       EvaluationBar: 'Show position evaluation',
       CheaterFinder: 'Detect engine assistance',
@@ -3757,7 +4027,7 @@ function cseRenderGui() {
     };
     const icon = iconMap[mod.id] || { color: '#888', bg: 'rgba(136,136,136,0.12)', svg: '?' };
     const desc = descMap[mod.id] || '';
-    const isRunning = mod.active && (mod.id === 'AutoPlay' || mod.id === 'AutoMove' || mod.id === 'PuzzleRush');
+    const isRunning = mod.active && (mod.id === 'AutoPlay' || mod.id === 'AutoMove' || mod.id === 'PuzzleRush' || mod.id === 'ToxicChat');
 
     card.innerHTML = `
       <div class="cse-mc-card-top">
@@ -3778,6 +4048,12 @@ function cseRenderGui() {
     `;
 
     card.querySelector('.cse-mc-toggle').addEventListener('click', () => {
+      const wasActive = !!mod.active;
+      const activateAnim = () => {
+        card.classList.add('cse-mc-card-activating');
+        setTimeout(() => card.classList.remove('cse-mc-card-activating'), 200);
+      };
+      const finalizeModuleToggle = () => {
       if (mod.id === 'AutoMove') {
         isAutomoveEnabled = !isAutomoveEnabled;
         if (!isAutomoveEnabled) {
@@ -3804,6 +4080,14 @@ function cseRenderGui() {
         } else {
           startAutoPlayTicker();
         }
+      } else if (mod.id === 'ToxicChat') {
+        isToxicChatEnabled = !isToxicChatEnabled;
+        if (!isToxicChatEnabled) {
+          stopToxicChatTicker();
+          clearToxicChatState();
+        } else {
+          startToxicChatTicker();
+        }
       } else if (mod.id === 'SuggestMove') {
         arrowsEnabled = !arrowsEnabled;
         if (!arrowsEnabled) hideBestMoveOverlay();
@@ -3822,6 +4106,13 @@ function cseRenderGui() {
       syncGuiHudPanel();
       cseSaveState();
       cseRenderGui();
+      };
+      if (!wasActive) {
+        activateAnim();
+        setTimeout(finalizeModuleToggle, 120);
+      } else {
+        finalizeModuleToggle();
+      }
     });
 
     const dots = card.querySelector('.cse-mc-dots');
@@ -3863,6 +4154,7 @@ function cseRenderSettingsPanel(modId) {
   const isAuto = modId === 'AutoMove';
   const isPuzzleRush = modId === 'PuzzleRush';
   const isAutoPlay = modId === 'AutoPlay';
+  const isToxicChat = modId === 'ToxicChat';
   const isEvalBar = modId === 'EvaluationBar';
   const isDepth = modId === 'SuggestMove';
   ov.innerHTML = `
@@ -3918,6 +4210,23 @@ function cseRenderSettingsPanel(modId) {
           <label class="cse-mc-check">
             <input type="checkbox" id="cse-sp-autoplay-rematch" ${autoPlayAcceptRematch ? 'checked' : ''}>
             <span>Accept rematches if requested</span>
+          </label>
+        </div>
+      ` : isToxicChat ? `
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">Message</span>
+          <input type="text" class="cse-mc-slider" id="cse-sp-toxic-message" value="${escapeHtmlAttr(toxicChatMessage)}" style="height:34px;padding:0 10px;border-radius:8px;outline:none;">
+        </div>
+        <div class="cse-mc-srow cse-mc-check-row">
+          <label class="cse-mc-check">
+            <input type="checkbox" id="cse-sp-toxic-start" ${toxicChatSendOnStart ? 'checked' : ''}>
+            <span>Send at game start</span>
+          </label>
+        </div>
+        <div class="cse-mc-srow cse-mc-check-row">
+          <label class="cse-mc-check">
+            <input type="checkbox" id="cse-sp-toxic-end" ${toxicChatSendOnEnd ? 'checked' : ''}>
+            <span>Send at game end</span>
           </label>
         </div>
       ` : isEvalBar ? `
@@ -4090,6 +4399,28 @@ function cseRenderSettingsPanel(modId) {
       cseSaveState();
       if (isAutoPlayEnabled) performAutoPlayTick();
     });
+  } else if (isToxicChat) {
+    const messageInput = ov.querySelector('#cse-sp-toxic-message');
+    const startCb = ov.querySelector('#cse-sp-toxic-start');
+    const endCb = ov.querySelector('#cse-sp-toxic-end');
+    if (messageInput) {
+      messageInput.addEventListener('input', () => {
+        toxicChatMessage = String(messageInput.value || '').slice(0, 240);
+        cseSaveState();
+      });
+    }
+    if (startCb) {
+      startCb.addEventListener('change', () => {
+        toxicChatSendOnStart = !!startCb.checked;
+        cseSaveState();
+      });
+    }
+    if (endCb) {
+      endCb.addEventListener('change', () => {
+        toxicChatSendOnEnd = !!endCb.checked;
+        cseSaveState();
+      });
+    }
   } else if (isEvalBar) {
     const depSl = ov.querySelector('#cse-sp-depth');
     if (depSl) {
@@ -4324,8 +4655,12 @@ function createToolsGui() {
 
 function closeToolsGui() {
   if (toolsModal) {
-    toolsModal.remove();
+    const modalToClose = toolsModal;
     toolsModal = null;
+    modalToClose.classList.add('cse-mc-gui-closing');
+    setTimeout(() => {
+      if (modalToClose?.isConnected) modalToClose.remove();
+    }, 180);
   }
   if (guiRefreshInterval) {
     clearInterval(guiRefreshInterval);
@@ -4467,6 +4802,7 @@ applySavedGuiAndModuleState();
 if (isEvalBarEnabled) createEvaluationBarPanel();
 if (isAutomoveEnabled || isPuzzleRushEnabled) startAutomoveUiTicker();
 if (isAutoPlayEnabled) startAutoPlayTicker();
+if (isToxicChatEnabled) startToxicChatTicker();
 syncGuiHudPanel();
 ensureEvalEngineState(true);
 cseSaveState();
@@ -4488,8 +4824,10 @@ new MutationObserver(() => {
     lastEvalMoveSourceFen = null;
     clearPremoveSchedule();
     clearAutoPlaySchedule(true);
+    clearToxicChatState();
     window.CSEAutoModules?.onUrlChanged?.();
     if (isAutoPlayEnabled) performAutoPlayTick();
+    if (isToxicChatEnabled) performToxicChatTick();
     setTimeout(() => window.CSEStatsCheater?.scanAndInject?.(), 1000);
   }
 }).observe(document, { subtree: true, childList: true });
