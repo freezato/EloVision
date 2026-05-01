@@ -447,6 +447,20 @@
   50%       { opacity: 0.3; }
 }
 
+/* ── Eval Bar: percent-only mode ────────────────────────────── */
+.cse-eval-bar-root.cse-eval-mode-percent {
+  height: auto;
+  min-height: 72px;
+  width: 44px;
+}
+.cse-eval-bar-root.cse-eval-mode-percent .cse-eval-score {
+  font-size: 13px;
+  font-weight: 800;
+  padding: 6px 2px;
+}
+.cse-eval-bar-root.cse-eval-mode-percent .cse-eval-score.cse-eval-white-adv { color: #e8e8e8; }
+.cse-eval-bar-root.cse-eval-mode-percent .cse-eval-score.cse-eval-black-adv { color: #7070a0; }
+
 /* ── Eval Toggle Button ─────────────────────────────────────── */
 .cse-tools-open-btn {
   position: fixed;

@@ -43,6 +43,7 @@ let lastEvalTopMoves = [];
 let lastEvalPvLines = [];
 let lastEvalMate = null;
 let stockfishAutoReloadEnabled = false;
+let evalBarDisplayMode = 'bar'; // 'bar' | 'percent'
 let stockfishFailureStreak = 0;
 let stockfishFailureSinceAt = 0;
 let stockfishLastSuccessAt = 0;
@@ -113,6 +114,7 @@ function cseSaveState() {
       suggestMoveDepth,
       stockfishAutoReloadEnabled,
       autoPlayAcceptRematch,
+      evalBarDisplayMode,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -2881,7 +2883,8 @@ function updateEvalBarDisplay(result) {
       const blackPct = 100 - whitePct;
       blackSeg.style.height = blackPct + '%';
       whiteSeg.style.height = whitePct + '%';
-      scoreEl.textContent = label;
+      const displayLabel = evalBarDisplayMode === 'percent' ? Math.round(whitePct) + '%' : label;
+      scoreEl.textContent = displayLabel;
       scoreEl.className = 'cse-eval-score ' + cls;
     }
     evalBarPanel.title = result.bestMove ? `Best move: ${result.bestMove}` : '';
@@ -2935,6 +2938,9 @@ function applySavedGuiAndModuleState() {
     if (Number.isFinite(saved.settings.suggestMoveDepth)) suggestMoveDepth = Math.max(1, Math.min(15, Math.round(saved.settings.suggestMoveDepth)));
     stockfishAutoReloadEnabled = !!saved.settings.stockfishAutoReloadEnabled;
     autoPlayAcceptRematch = saved.settings.autoPlayAcceptRematch !== false;
+    if (saved.settings.evalBarDisplayMode === 'percent' || saved.settings.evalBarDisplayMode === 'bar') {
+      evalBarDisplayMode = saved.settings.evalBarDisplayMode;
+    }
   }
 }
 
@@ -3424,7 +3430,8 @@ function cseRenderSettingsPanel(modId) {
   const isAuto = modId === 'AutoMove';
   const isPuzzleRush = modId === 'PuzzleRush';
   const isAutoPlay = modId === 'AutoPlay';
-  const isDepth = modId === 'SuggestMove' || modId === 'EvaluationBar';
+  const isEvalBar = modId === 'EvaluationBar';
+  const isDepth = modId === 'SuggestMove';
   ov.innerHTML = `
     <div class="cse-mc-spanel">
       <div class="cse-mc-spanel-header">
@@ -3477,7 +3484,18 @@ function cseRenderSettingsPanel(modId) {
         <div class="cse-mc-srow cse-mc-check-row">
           <label class="cse-mc-check">
             <input type="checkbox" id="cse-sp-autoplay-rematch" ${autoPlayAcceptRematch ? 'checked' : ''}>
-            <span>Accetta rivincite se richieste</span>
+            <span>Accept rematches if requested</span>
+          </label>
+        </div>
+      ` : isEvalBar ? `
+        <div class="cse-mc-srow">
+          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-depth-val">${suggestMoveDepth}</span></div>
+          <input type="range" class="cse-mc-slider" id="cse-sp-depth" min="1" max="15" step="1" value="${suggestMoveDepth}">
+        </div>
+        <div class="cse-mc-srow cse-mc-check-row">
+          <label class="cse-mc-check">
+            <input type="checkbox" id="cse-sp-eval-percent" ${evalBarDisplayMode === 'percent' ? 'checked' : ''} style="accent-color:#4a9e5c;width:15px;height:15px;flex-shrink:0;margin-top:1px;">
+            <span>Show only numeric percentage</span>
           </label>
         </div>
       ` : isDepth ? `
@@ -3639,6 +3657,28 @@ function cseRenderSettingsPanel(modId) {
       cseSaveState();
       if (isAutoPlayEnabled) performAutoPlayTick();
     });
+  } else if (isEvalBar) {
+    const depSl = ov.querySelector('#cse-sp-depth');
+    if (depSl) {
+      depSl.addEventListener('input', () => {
+        suggestMoveDepth = parseInt(depSl.value, 10);
+        ov.querySelector('#cse-sp-depth-val').textContent = suggestMoveDepth;
+        evalCache.clear();
+        lastEvalFen = null;
+        lastEvalPvLines = [];
+        lastEvalMate = null;
+        cseSaveState();
+        ensureEvalEngineState(true);
+      });
+    }
+    const percentCb = ov.querySelector('#cse-sp-eval-percent');
+    if (percentCb) {
+      percentCb.addEventListener('change', () => {
+        evalBarDisplayMode = percentCb.checked ? 'percent' : 'bar';
+        applyEvalBarDisplayMode();
+        cseSaveState();
+      });
+    }
   } else if (isDepth) {
     const depSl = ov.querySelector('#cse-sp-depth');
     if (!depSl) return;
@@ -3652,6 +3692,22 @@ function cseRenderSettingsPanel(modId) {
       cseSaveState();
       ensureEvalEngineState(true);
     });
+  }
+}
+
+function applyEvalBarDisplayMode(bar) {
+  if (!bar) bar = evalBarPanel;
+  if (!bar) return;
+  const inner = bar.querySelector('.cse-eval-inner');
+  const label = bar.querySelector('.cse-eval-label');
+  if (evalBarDisplayMode === 'percent') {
+    bar.classList.add('cse-eval-mode-percent');
+    if (inner) inner.style.display = 'none';
+    if (label) label.style.display = 'none';
+  } else {
+    bar.classList.remove('cse-eval-mode-percent');
+    if (inner) inner.style.display = '';
+    if (label) label.style.display = '';
   }
 }
 
@@ -3670,6 +3726,7 @@ function createEvaluationBarPanel() {
     <div class="cse-eval-label">Eval</div>
   `;
   document.body.appendChild(bar);
+  applyEvalBarDisplayMode(bar);
 
   const savedPos = getSavedEvalBarPosition();
   const desired = savedPos || { left: Math.max(12, window.innerWidth - 70), top: 120 };

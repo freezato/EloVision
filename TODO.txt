@@ -6,6 +6,6 @@
 ------------------------
 
 
-[] Engine lento a pensare.
+[] Engine lento a pensare (soprattutto nei puzzles) - Provare ad aggiungere stockfish in locale se è una buona opzione.
 [] Aggiungere animazioni per la chiusura della gui.
 [] Aggiungere animazioni per l'attivazione dei moduli
