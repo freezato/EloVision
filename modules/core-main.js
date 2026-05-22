@@ -67,11 +67,14 @@ let automoveDelayMax = 5;  // seconds (user configurable)
 let automoveFastWhenLowTime = false; // speed up when own clock < 30s
 let automoveFastInOpening = false;   // speed up during first 8 full moves
 let automoveUseSmartPremoves = false; // queue premoves in tactical/forced spots
+let automoveToggleHotkey = 'none'; // KeyboardEvent.code or 'none'
 let isPuzzleRushEnabled = false;
 let isAutoPlayEnabled = false;
 let isToxicChatEnabled = false;
+let isGameInsightsEnabled = false;
 let puzzleRushDepth = 20;
 let suggestMoveDepth = 15; // depth for SuggestMove/Arrows (user configurable)
+let suggestMoveToggleHotkey = 'none'; // KeyboardEvent.code or 'none'
 let toxicChatMessage = 'gg ez';
 let toxicChatSendOnStart = false;
 let toxicChatSendOnEnd = true;
@@ -116,6 +119,7 @@ function cseSaveState() {
       PuzzleRush: !!isPuzzleRushEnabled,
       AutoPlay: !!isAutoPlayEnabled,
       ToxicChat: !!isToxicChatEnabled,
+      GameInsights: !!isGameInsightsEnabled,
       SuggestMove: !!arrowsEnabled,
       EvaluationBar: !!isEvalBarEnabled,
       GUI: !!isGuiHudEnabled,
@@ -128,8 +132,10 @@ function cseSaveState() {
       automoveFastWhenLowTime,
       automoveFastInOpening,
       automoveUseSmartPremoves,
+      automoveToggleHotkey,
       puzzleRushDepth,
       suggestMoveDepth,
+      suggestMoveToggleHotkey,
       stockfishAutoReloadEnabled,
       autoPlayAcceptRematch,
       toxicChatMessage,
@@ -294,6 +300,24 @@ function getFullmoveNumberFromMoveListOnly() {
   const plyCount = getPlyCountFromMoveList();
   if (!Number.isInteger(plyCount) || plyCount < 0) return null;
   return Math.max(1, Math.floor(plyCount / 2) + 1);
+}
+
+function normalizeModuleHotkey(value) {
+  if (typeof value !== 'string') return 'none';
+  const next = value.trim();
+  if (!next) return 'none';
+  return next === 'none' ? 'none' : next;
+}
+
+function formatHotkeyLabel(code) {
+  if (!code || code === 'Unidentified') return 'None';
+  if (code === 'none') return 'None';
+  if (typeof code === 'string' && code.startsWith('Numpad')) return code.replace('Numpad', 'Num ');
+  if (typeof code === 'string' && code.startsWith('Key')) return code.slice(3);
+  if (typeof code === 'string' && code.startsWith('Digit')) return code.slice(5);
+  if (typeof code === 'string' && code.startsWith('Arrow')) return code.replace('Arrow', 'Arrow ');
+  if (typeof code === 'string' && code === 'Space') return 'Space';
+  return code;
 }
 
 function getReliablePlyCount() {
@@ -3438,7 +3462,7 @@ function updateEvalBarDisplay(result) {
 }
 const cseGuiState = {
   activeTab: 'ALL',
-  favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, ToxicChat: false, SuggestMove: false, EvaluationBar: false, GUI: false },
+  favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, ToxicChat: false, GameInsights: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
   settingsSection: 'general',
 };
@@ -3454,6 +3478,7 @@ function applySavedGuiAndModuleState() {
       PuzzleRush: !!saved.favorites.PuzzleRush,
       AutoPlay: !!saved.favorites.AutoPlay,
       ToxicChat: !!saved.favorites.ToxicChat,
+      GameInsights: !!saved.favorites.GameInsights,
       SuggestMove: !!saved.favorites.SuggestMove,
       EvaluationBar: !!saved.favorites.EvaluationBar,
       GUI: !!saved.favorites.GUI,
@@ -3469,6 +3494,7 @@ function applySavedGuiAndModuleState() {
     isPuzzleRushEnabled = !!saved.modules.PuzzleRush;
     isAutoPlayEnabled = !!saved.modules.AutoPlay;
     isToxicChatEnabled = !!saved.modules.ToxicChat;
+    isGameInsightsEnabled = !!saved.modules.GameInsights;
     arrowsEnabled = !!saved.modules.SuggestMove;
     isEvalBarEnabled = !!saved.modules.EvaluationBar;
     isGuiHudEnabled = !!saved.modules.GUI;
@@ -3485,8 +3511,10 @@ function applySavedGuiAndModuleState() {
     automoveFastWhenLowTime = !!saved.settings.automoveFastWhenLowTime;
     automoveFastInOpening = !!saved.settings.automoveFastInOpening;
     automoveUseSmartPremoves = !!saved.settings.automoveUseSmartPremoves;
+    automoveToggleHotkey = normalizeModuleHotkey(saved.settings.automoveToggleHotkey);
     if (Number.isFinite(saved.settings.puzzleRushDepth)) puzzleRushDepth = Math.max(1, Math.min(15, Math.round(saved.settings.puzzleRushDepth)));
     if (Number.isFinite(saved.settings.suggestMoveDepth)) suggestMoveDepth = Math.max(1, Math.min(15, Math.round(saved.settings.suggestMoveDepth)));
+    suggestMoveToggleHotkey = normalizeModuleHotkey(saved.settings.suggestMoveToggleHotkey);
     stockfishAutoReloadEnabled = !!saved.settings.stockfishAutoReloadEnabled;
     autoPlayAcceptRematch = saved.settings.autoPlayAcceptRematch !== false;
     if (typeof saved.settings.toxicChatMessage === 'string') toxicChatMessage = saved.settings.toxicChatMessage;
@@ -3522,7 +3550,7 @@ function clampToViewport(el, left, top) {
 }
 
 function isEvaluationEngineNeeded() {
-  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled);
+  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled || isGameInsightsEnabled);
 }
 
 function resetStockfishFailureTracking() {
@@ -3657,6 +3685,11 @@ function getActiveModuleHudEntries() {
     });
   }
   if (isToxicChatEnabled) entries.push({ key: 'ToxicChat', html: 'ToxicChat' });
+  if (isGameInsightsEnabled) {
+    const s = window.CSEGameInsights?.getLiveStats?.();
+    const mini = s ? ` M${s.moveCount} CPL ${s.avgCpl}` : ' live';
+    entries.push({ key: 'GameInsights|' + mini, html: `GameInsights <span class="cse-gui-hud-timer">${mini}</span>` });
+  }
   if (arrowsEnabled) entries.push({ key: 'SuggestMove', html: 'SuggestMove' });
   if (isEvalBarEnabled) entries.push({ key: 'EvaluationBar', html: 'EvaluationBar' });
   if (isGuiHudEnabled) entries.push({ key: 'GUI', html: 'GUI' });
@@ -3704,6 +3737,7 @@ function cseRenderGui() {
     { id: 'PuzzleRush', label: 'Puzzle Rush', active: isPuzzleRushEnabled, hasSettings: true },
     { id: 'AutoPlay', label: 'AutoPlay', active: isAutoPlayEnabled, hasSettings: true },
     { id: 'ToxicChat', label: 'Toxic Chat', active: isToxicChatEnabled, hasSettings: true },
+    { id: 'GameInsights', label: 'Game Insights', active: isGameInsightsEnabled, hasSettings: false },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
@@ -3724,7 +3758,10 @@ function cseRenderGui() {
   if (tab === 'SETTINGS') {
     cseGuiState.openSettings = null;
     const ov = modal.querySelector('#cse-mc-settings-overlay');
-    if (ov) ov.style.display = 'none';
+    if (ov) {
+      ov.style.display = 'none';
+      ov.classList.remove('is-open', 'is-closing');
+    }
 
     const failureFor = stockfishFailureSinceAt ? formatAgo(stockfishFailureSinceAt) : '-';
     const noFenFor = stockfishNoFenSinceAt ? formatAgo(stockfishNoFenSinceAt) : '-';
@@ -3998,6 +4035,10 @@ function cseRenderGui() {
         color: '#cf5a87', bg: 'rgba(207,90,135,0.14)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>`
       },
+      GameInsights: {
+        color: '#6bb58b', bg: 'rgba(107,181,139,0.14)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19h16"/><path d="M7 16l3-4 3 2 4-6"/></svg>`
+      },
       SuggestMove: {
         color: '#5b8fc9', bg: 'rgba(91,143,201,0.15)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>`
@@ -4020,6 +4061,7 @@ function cseRenderGui() {
       PuzzleRush: 'Solve puzzles faster',
       AutoPlay: 'Play full games automatically',
       ToxicChat: 'Send auto chat message',
+      GameInsights: 'Live move quality and recap',
       SuggestMove: 'Suggest the best moves',
       EvaluationBar: 'Show position evaluation',
       CheaterFinder: 'Detect engine assistance',
@@ -4027,7 +4069,7 @@ function cseRenderGui() {
     };
     const icon = iconMap[mod.id] || { color: '#888', bg: 'rgba(136,136,136,0.12)', svg: '?' };
     const desc = descMap[mod.id] || '';
-    const isRunning = mod.active && (mod.id === 'AutoPlay' || mod.id === 'AutoMove' || mod.id === 'PuzzleRush' || mod.id === 'ToxicChat');
+    const isRunning = mod.active && (mod.id === 'AutoPlay' || mod.id === 'AutoMove' || mod.id === 'PuzzleRush' || mod.id === 'ToxicChat' || mod.id === 'GameInsights');
 
     card.innerHTML = `
       <div class="cse-mc-card-top">
@@ -4055,14 +4097,8 @@ function cseRenderGui() {
       };
       const finalizeModuleToggle = () => {
       if (mod.id === 'AutoMove') {
-        isAutomoveEnabled = !isAutomoveEnabled;
-        if (!isAutomoveEnabled) {
-          clearAutomoveSchedule();
-          clearPremoveSchedule();
-          if (!isPuzzleRushEnabled) stopAutomoveUiTicker();
-        } else {
-          startAutomoveUiTicker();
-        }
+        setAutomoveEnabled(!isAutomoveEnabled);
+        return;
       } else if (mod.id === 'PuzzleRush') {
         isPuzzleRushEnabled = !isPuzzleRushEnabled;
         clearPuzzleRushDepthFallback();
@@ -4088,9 +4124,13 @@ function cseRenderGui() {
         } else {
           startToxicChatTicker();
         }
+      } else if (mod.id === 'GameInsights') {
+        isGameInsightsEnabled = !isGameInsightsEnabled;
+        window.CSEGameInsights?.setEnabled?.(isGameInsightsEnabled);
+        window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
       } else if (mod.id === 'SuggestMove') {
-        arrowsEnabled = !arrowsEnabled;
-        if (!arrowsEnabled) hideBestMoveOverlay();
+        setSuggestMoveEnabled(!arrowsEnabled);
+        return;
       } else if (mod.id === 'EvaluationBar') {
         isEvalBarEnabled = !isEvalBarEnabled;
         if (isEvalBarEnabled) createEvaluationBarPanel();
@@ -4139,9 +4179,107 @@ function cseRenderGui() {
   if (cseGuiState.openSettings && !mods.find(m => m.id === cseGuiState.openSettings)) {
     cseGuiState.openSettings = null;
     const ov = modal.querySelector('#cse-mc-settings-overlay');
-    if (ov) ov.style.display = 'none';
+    if (ov) {
+      ov.style.display = 'none';
+      ov.classList.remove('is-open', 'is-closing');
+    }
   }
   syncGuiHudPanel();
+}
+
+function refreshGuiIfOpen() {
+  if (toolsModal?.isConnected) cseRenderGui();
+}
+
+function setAutomoveEnabled(enabled) {
+  const next = !!enabled;
+  if (isAutomoveEnabled === next) return;
+  isAutomoveEnabled = next;
+  if (!isAutomoveEnabled) {
+    clearAutomoveSchedule();
+    clearPremoveSchedule();
+    if (!isPuzzleRushEnabled) stopAutomoveUiTicker();
+  } else {
+    startAutomoveUiTicker();
+  }
+  ensureEvalEngineState(true);
+  if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
+  updateAutomoveButtonState();
+  syncGuiHudPanel();
+  cseSaveState();
+  refreshGuiIfOpen();
+}
+
+function setSuggestMoveEnabled(enabled) {
+  const next = !!enabled;
+  if (arrowsEnabled === next) return;
+  arrowsEnabled = next;
+  if (!arrowsEnabled) hideBestMoveOverlay();
+  ensureEvalEngineState(true);
+  if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
+  updateAutomoveButtonState();
+  syncGuiHudPanel();
+  cseSaveState();
+  refreshGuiIfOpen();
+}
+
+function isEditableTarget(el) {
+  if (!el || !(el instanceof Element)) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
+
+function installModuleHotkeys() {
+  document.addEventListener('keydown', e => {
+    if (e.repeat || isEditableTarget(e.target)) return;
+    if (automoveToggleHotkey !== 'none' && e.code === automoveToggleHotkey) {
+      e.preventDefault();
+      setAutomoveEnabled(!isAutomoveEnabled);
+      return;
+    }
+    if (suggestMoveToggleHotkey !== 'none' && e.code === suggestMoveToggleHotkey) {
+      e.preventDefault();
+      setSuggestMoveEnabled(!arrowsEnabled);
+    }
+  });
+}
+
+function bindHotkeyCapture(overlayEl, inputId, onChange) {
+  const input = overlayEl.querySelector(`#${inputId}`);
+  if (!input) return;
+  let armed = false;
+
+  const setDisplay = code => {
+    input.value = code === 'none' ? 'None' : formatHotkeyLabel(code);
+    input.dataset.hotkey = code;
+  };
+
+  input.addEventListener('click', () => {
+    armed = true;
+    input.value = 'Press a key... (Esc = None)';
+    input.focus();
+  });
+
+  input.addEventListener('keydown', e => {
+    if (!armed) return;
+    e.preventDefault();
+    e.stopPropagation();
+    let code = e.code || 'none';
+    if (code === 'Escape') code = 'none';
+    if (code === 'ShiftLeft' || code === 'ShiftRight' || code === 'ControlLeft' || code === 'ControlRight' || code === 'AltLeft' || code === 'AltRight' || code === 'MetaLeft' || code === 'MetaRight') return;
+    code = normalizeModuleHotkey(code);
+    onChange(code);
+    setDisplay(code);
+    armed = false;
+    input.blur();
+  });
+
+  input.addEventListener('blur', () => {
+    armed = false;
+    const current = normalizeModuleHotkey(input.dataset.hotkey || 'none');
+    setDisplay(current);
+  });
 }
 
 function cseRenderSettingsPanel(modId) {
@@ -4150,6 +4288,14 @@ function cseRenderSettingsPanel(modId) {
   const ov = modal.querySelector('#cse-mc-settings-overlay');
   if (!ov) return;
   ov.style.display = 'block';
+  ov.classList.remove('is-closing');
+  ov.classList.remove('is-open');
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      if (!ov.isConnected || ov.style.display === 'none') return;
+      ov.classList.add('is-open');
+    });
+  });
 
   const isAuto = modId === 'AutoMove';
   const isPuzzleRush = modId === 'PuzzleRush';
@@ -4196,6 +4342,10 @@ function cseRenderSettingsPanel(modId) {
             <input type="checkbox" id="cse-sp-smart-premoves" ${automoveUseSmartPremoves ? 'checked' : ''}>
             <span>Smart premoves</span>
           </label>
+        </div>
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">Toggle hotkey</span>
+          <input type="text" class="cse-mc-hotkey-input" id="cse-sp-automove-hotkey" value="${escapeHtmlAttr(formatHotkeyLabel(automoveToggleHotkey))}" data-hotkey="${escapeHtmlAttr(automoveToggleHotkey)}" readonly>
         </div>
       ` : isPuzzleRush ? `
         <div class="cse-mc-srow">
@@ -4245,6 +4395,10 @@ function cseRenderSettingsPanel(modId) {
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-depth-val">${suggestMoveDepth}</span></div>
           <input type="range" class="cse-mc-slider" id="cse-sp-depth" min="1" max="15" step="1" value="${suggestMoveDepth}">
         </div>
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">Toggle hotkey</span>
+          <input type="text" class="cse-mc-hotkey-input" id="cse-sp-suggest-hotkey" value="${escapeHtmlAttr(formatHotkeyLabel(suggestMoveToggleHotkey))}" data-hotkey="${escapeHtmlAttr(suggestMoveToggleHotkey)}" readonly>
+        </div>
       ` : `
         <div class="cse-mc-srow">
           <span class="cse-mc-slabel">No settings for this module.</span>
@@ -4253,9 +4407,21 @@ function cseRenderSettingsPanel(modId) {
     </div>
   `;
 
-  ov.querySelector('#cse-mc-sp-close').addEventListener('click', () => {
-    ov.style.display = 'none';
+  const closeSettingsPanel = () => {
+    ov.classList.remove('is-open');
+    ov.classList.add('is-closing');
     cseGuiState.openSettings = null;
+    window.setTimeout(() => {
+      ov.style.display = 'none';
+      ov.classList.remove('is-closing');
+    }, 240);
+  };
+
+  ov.querySelector('#cse-mc-sp-close').addEventListener('click', closeSettingsPanel);
+  ov.addEventListener('mousedown', e => {
+    if (e.target === ov) {
+      closeSettingsPanel();
+    }
   });
 
   // Draggable settings panel
@@ -4376,6 +4542,10 @@ function cseRenderSettingsPanel(modId) {
         cseSaveState();
       });
     }
+    bindHotkeyCapture(ov, 'cse-sp-automove-hotkey', code => {
+      automoveToggleHotkey = code;
+      cseSaveState();
+    });
   } else if (isPuzzleRush) {
     const prDepth = ov.querySelector('#cse-sp-pr-depth');
     if (!prDepth) return;
@@ -4445,16 +4615,21 @@ function cseRenderSettingsPanel(modId) {
     }
   } else if (isDepth) {
     const depSl = ov.querySelector('#cse-sp-depth');
-    if (!depSl) return;
-    depSl.addEventListener('input', () => {
-      suggestMoveDepth = parseInt(depSl.value, 10);
-      ov.querySelector('#cse-sp-depth-val').textContent = suggestMoveDepth;
-      evalCache.clear();
-      lastEvalFen = null;
-      lastEvalPvLines = [];
-      lastEvalMate = null;
+    if (depSl) {
+      depSl.addEventListener('input', () => {
+        suggestMoveDepth = parseInt(depSl.value, 10);
+        ov.querySelector('#cse-sp-depth-val').textContent = suggestMoveDepth;
+        evalCache.clear();
+        lastEvalFen = null;
+        lastEvalPvLines = [];
+        lastEvalMate = null;
+        cseSaveState();
+        ensureEvalEngineState(true);
+      });
+    }
+    bindHotkeyCapture(ov, 'cse-sp-suggest-hotkey', code => {
+      suggestMoveToggleHotkey = code;
       cseSaveState();
-      ensureEvalEngineState(true);
     });
   }
 }
@@ -4734,10 +4909,29 @@ async function tickEvalBar() {
     }
   }
 
+  const prevFen = lastEvalMoveSourceFen;
   const result = await fetchEval(fen);
   if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
 
   updateEvalBarDisplay(result);
+  window.CSEGameInsights?.handleEval?.({
+    fen,
+    ply: getReliablePlyCount(),
+    cp: result && Number.isFinite(result.cp) ? result.cp : null,
+    mate: result && Number.isFinite(result.mate) ? result.mate : null,
+    bestMove: result?.bestMove || null,
+    topMoves: Array.isArray(result?.topMoves) ? result.topMoves.slice(0, 4) : [],
+    gameOver: isGameOverVisible(),
+  });
+  if (prevFen && prevFen !== fen) {
+    window.CSEGameInsights?.handleMove?.({
+      uci: null,
+      san: null,
+      fenBefore: prevFen,
+      fenAfter: fen,
+      ply: getReliablePlyCount(),
+    });
+  }
   if (!result) {
     // Eval transient error (API down/timeout/404 cache miss): retry same FEN on next tick.
     // Resetting lastEvalFen here avoids getting stuck on "?" forever for a position.
@@ -4799,6 +4993,10 @@ const observer = new MutationObserver(() => {
 });
 observer.observe(document.body, { childList: true, subtree: true });
 applySavedGuiAndModuleState();
+installModuleHotkeys();
+window.CSEGameInsights?.init?.();
+window.CSEGameInsights?.setEnabled?.(isGameInsightsEnabled);
+window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
 if (isEvalBarEnabled) createEvaluationBarPanel();
 if (isAutomoveEnabled || isPuzzleRushEnabled) startAutomoveUiTicker();
 if (isAutoPlayEnabled) startAutoPlayTicker();
@@ -4825,6 +5023,7 @@ new MutationObserver(() => {
     clearPremoveSchedule();
     clearAutoPlaySchedule(true);
     clearToxicChatState();
+    window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
     window.CSEAutoModules?.onUrlChanged?.();
     if (isAutoPlayEnabled) performAutoPlayTick();
     if (isToxicChatEnabled) performToxicChatTick();

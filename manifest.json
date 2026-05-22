@@ -17,6 +17,7 @@
       "matches": ["https://www.chess.com/*"],
       "js": [
         "modules/stats-cheater.js",
+        "modules/game-insights.js",
         "modules/core-main.js",
         "modules/eval-tools.js",
         "modules/auto-modules.js",

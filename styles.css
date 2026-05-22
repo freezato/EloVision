@@ -943,6 +943,18 @@
   backdrop-filter: blur(2px);
   border-radius: 14px;
   z-index: 10;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease, backdrop-filter 0.22s ease;
+}
+.cse-mc-settings-overlay.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  backdrop-filter: blur(3px);
+}
+.cse-mc-settings-overlay.is-closing {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .cse-mc-spanel {
@@ -952,9 +964,22 @@
   background: #202020;
   border: 1px solid rgba(255,255,255,0.1);
   border-radius: 12px;
-  width: 270px;
+  width: min(270px, calc(100% - 20px));
+  max-height: calc(100% - 20px);
   padding: 18px;
   box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  overflow-y: auto;
+  opacity: 0;
+  transform: translate(-50%,-50%) scale(0.92) translateY(10px);
+  transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.24s ease;
+}
+.cse-mc-settings-overlay.is-open .cse-mc-spanel {
+  opacity: 1;
+  transform: translate(-50%,-50%) scale(1) translateY(0);
+}
+.cse-mc-settings-overlay.is-closing .cse-mc-spanel {
+  opacity: 0;
+  transform: translate(-50%,-50%) scale(0.96) translateY(8px);
 }
 .cse-mc-spanel-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -1133,6 +1158,38 @@
 .cse-mc-sc-footer {
   font-size: 10px; color: #3a3a3a; margin-top: 10px;
   display: flex; align-items: center; gap: 5px;
+}
+.cse-mc-hotkey-input {
+  width: 100%;
+  margin-top: 8px;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid rgba(90,191,110,0.35);
+  background:
+    linear-gradient(180deg, rgba(74,158,92,0.08), rgba(74,158,92,0.03)),
+    #252a26;
+  color: #e5efe7;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  outline: none;
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.05),
+    0 3px 10px rgba(0,0,0,0.25);
+  transition: border-color 0.16s, box-shadow 0.16s, transform 0.1s;
+}
+.cse-mc-hotkey-input:focus {
+  border-color: #5abf6e;
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.06),
+    0 0 0 2px rgba(90,191,110,0.22),
+    0 6px 18px rgba(0,0,0,0.3);
+}
+.cse-mc-hotkey-input:hover {
+  border-color: rgba(90,191,110,0.55);
+  transform: translateY(-1px);
 }
 
 .cse-gs-page {

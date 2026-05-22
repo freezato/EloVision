@@ -7,7 +7,6 @@
 [DONE] Aggiungere animazioni per la chiusura della gui;
 [DONE] Aggiungere animazioni per l'attivazione dei moduli;
 [DONE] Aggiungere la chat tossica automatica, con opzione di scegliere a scelta il messaggio da inviare a fine partita;
-------------------------
+[DONE] Fixare "fast in opening", attualmente ogni mossa viene svolta in 1 secondo, anche dalla nona in poi;------------------------
 
-
-[] Fixare "fast in opening", attualmente ogni mossa viene svolta in 1 secondo, anche dalla nona in poi;
+[FIX] Game Insights mostra tutto 0
