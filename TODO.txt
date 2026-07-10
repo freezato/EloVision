@@ -10,3 +10,4 @@
 [DONE] Fixare "fast in opening", attualmente ogni mossa viene svolta in 1 secondo, anche dalla nona in poi;------------------------
 
 [FIX] Game Insights mostra tutto 0
+[TODO] Fix maia gui

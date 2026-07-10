@@ -30,7 +30,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["modules/stockfish/*"],
+      "resources": ["modules/stockfish/*", "modules/maia/*", "modules/maia/weights/*"],
       "matches": ["https://www.chess.com/*"]
     }
   ],

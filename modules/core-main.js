@@ -44,6 +44,7 @@ let lastEvalPvLines = [];
 let lastEvalMate = null;
 let stockfishAutoReloadEnabled = false;
 let stockfishProvider = 'local'; // 'local' | 'api'
+let maiaElo = 1500;
 let generalLanguage = 'en'; // 'en' | 'it'
 let generalNumbersFormat = 'default'; // 'default' | 'eu'
 let generalMinimizeToTray = true;
@@ -96,6 +97,13 @@ const STOCKFISH_TIMEOUT_FAST_MS = 780;
 const STOCKFISH_LOCAL_BOOT_TIMEOUT_MS = 9000;
 const STOCKFISH_LOCAL_MULTI_PV = 4;
 const STOCKFISH_LOCAL_SCRIPT_PATH = 'modules/stockfish/stockfish.js';
+const MAIA_ELO_MIN = 1100;
+const MAIA_ELO_MAX = 1900;
+const MAIA_ELO_STEP = 100;
+const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
+const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
+const MAIA_LOCAL_BOOT_TIMEOUT_MS = 9000;
+const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 2400;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -126,6 +134,7 @@ function cseSaveState() {
     },
     settings: {
       stockfishProvider,
+      maiaElo,
       automoveMode,
       automoveDelayMin,
       automoveDelayMax,
@@ -2055,6 +2064,7 @@ async function performAutomove() {
     delayMs: automoveDelayMs,
     side: playerSide,
     mode: automoveMode,
+    engine: getActiveEvalEngineLabel(),
     delayReasons: delayCfg.reasons,
     ownClockSec: delayCfg.ownClockSec,
     topMoves: (lastEvalTopMoves || []).slice(0, 4)
@@ -2456,9 +2466,42 @@ let localStockfishWorkerBlobUrl = null;
 let localStockfishInitPromise = null;
 let localStockfishSearchId = 0;
 let localStockfishCurrentSearch = null;
+let localMaiaWorker = null;
+let localMaiaWorkerBlobUrl = null;
+let localMaiaInitPromise = null;
+let localMaiaSearchId = 0;
+let localMaiaCurrentSearch = null;
+let localMaiaLoadedElo = null;
 
 function isLocalStockfishProvider() {
   return stockfishProvider === 'local';
+}
+
+function normalizeMaiaElo(value) {
+  const parsed = Number.isFinite(value) ? value : parseInt(value, 10);
+  const raw = Number.isFinite(parsed) ? parsed : 1500;
+  const snapped = Math.round((raw - MAIA_ELO_MIN) / MAIA_ELO_STEP) * MAIA_ELO_STEP + MAIA_ELO_MIN;
+  return Math.max(MAIA_ELO_MIN, Math.min(MAIA_ELO_MAX, snapped));
+}
+
+function getMaiaWeightsPath(elo = maiaElo) {
+  return `${MAIA_LOCAL_WEIGHTS_DIR}/maia-${normalizeMaiaElo(elo)}.pb.gz`;
+}
+
+function getActiveEvalEngineId() {
+  if (isPuzzleContext() && isPuzzleRushEnabled) return 'stockfish';
+  if (isAutomoveEnabled && !isPuzzleContext() && automoveMode === 'legit') return 'maia';
+  return 'stockfish';
+}
+
+function getActiveEvalEngineCacheToken(engineId = getActiveEvalEngineId()) {
+  if (engineId === 'maia') return `maia-${normalizeMaiaElo(maiaElo)}`;
+  return `stockfish-${stockfishProvider}`;
+}
+
+function getActiveEvalEngineLabel(engineId = getActiveEvalEngineId()) {
+  if (engineId === 'maia') return `Maia ${normalizeMaiaElo(maiaElo)}`;
+  return stockfishProvider === 'local' ? 'Local Stockfish' : 'Stockfish API';
 }
 
 function clearLocalStockfishSearch(result = null, { aborted = false } = {}) {
@@ -2710,6 +2753,204 @@ async function runLocalStockfishEval(fen, queryDepth, signal) {
   });
 }
 
+function clearLocalMaiaSearch(result = null, { aborted = false } = {}) {
+  const search = localMaiaCurrentSearch;
+  if (!search || search.done) return;
+  search.done = true;
+  if (search.timeoutId) clearTimeout(search.timeoutId);
+  if (search.signal && search.abortHandler) {
+    try { search.signal.removeEventListener('abort', search.abortHandler); } catch {}
+  }
+  localMaiaCurrentSearch = null;
+  if (aborted) search.reject(makeAbortError());
+  else search.resolve(result);
+}
+
+function releaseLocalMaiaEngine() {
+  if (localMaiaWorker) {
+    try {
+      localMaiaWorker.removeEventListener('message', onLocalMaiaMessage);
+      localMaiaWorker.removeEventListener('error', onLocalMaiaError);
+    } catch {}
+    try { localMaiaWorker.postMessage('quit'); } catch {}
+    try { localMaiaWorker.terminate(); } catch {}
+  }
+  localMaiaWorker = null;
+  localMaiaLoadedElo = null;
+
+  if (localMaiaWorkerBlobUrl) {
+    try { URL.revokeObjectURL(localMaiaWorkerBlobUrl); } catch {}
+    localMaiaWorkerBlobUrl = null;
+  }
+
+  if (localMaiaCurrentSearch && !localMaiaCurrentSearch.done) {
+    clearLocalMaiaSearch(null);
+  }
+}
+
+function onLocalMaiaMessage(event) {
+  const line = String(event?.data || '').trim();
+  const search = localMaiaCurrentSearch;
+  if (!search || search.done || !line) return;
+
+  if (line.startsWith('info ')) {
+    parseLocalStockfishInfoLine(line, search.linesByPv);
+    return;
+  }
+
+  if (line.startsWith('bestmove ')) {
+    const bestMove = extractUciMove(line);
+    const result = buildLocalStockfishResult(search.turn, bestMove, search.linesByPv);
+    if (result) {
+      result.engine = 'maia';
+      result.maiaElo = search.elo;
+    }
+    clearLocalMaiaSearch(result);
+  }
+}
+
+function onLocalMaiaError() {
+  clearLocalMaiaSearch(null);
+  releaseLocalMaiaEngine();
+}
+
+function ensureLocalMaiaEngine() {
+  const elo = normalizeMaiaElo(maiaElo);
+  if (localMaiaWorker && localMaiaLoadedElo === elo) return Promise.resolve(localMaiaWorker);
+  if (localMaiaWorker && localMaiaLoadedElo !== elo) releaseLocalMaiaEngine();
+  if (localMaiaInitPromise) return localMaiaInitPromise;
+
+  localMaiaInitPromise = (async () => {
+    const scriptUrl = chrome.runtime.getURL(MAIA_LOCAL_SCRIPT_PATH);
+    const weightsUrl = chrome.runtime.getURL(getMaiaWeightsPath(elo));
+    const res = await fetch(scriptUrl);
+    if (!res.ok) throw new Error(`local-maia-script-${res.status}`);
+    const source = await res.text();
+    if (!source || source.length < 200) throw new Error('local-maia-script-empty');
+
+    const blob = new Blob([source], { type: 'text/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    const worker = new Worker(blobUrl);
+    localMaiaWorker = worker;
+    localMaiaWorkerBlobUrl = blobUrl;
+
+    await new Promise((resolve, reject) => {
+      let done = false;
+      let sentReady = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('local-maia-init-timeout'));
+      }, MAIA_LOCAL_BOOT_TIMEOUT_MS);
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        try { worker.removeEventListener('message', onInitMessage); } catch {}
+        try { worker.removeEventListener('error', onInitError); } catch {}
+      };
+
+      const onInitError = () => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('local-maia-init-error'));
+      };
+
+      const onInitMessage = (evt) => {
+        const text = String(evt?.data || '').trim();
+        if (text === 'uciok' && !sentReady) {
+          sentReady = true;
+          try {
+            worker.postMessage(`setoption name WeightsFile value ${weightsUrl}`);
+            worker.postMessage('setoption name Threads value 1');
+            worker.postMessage('setoption name MinibatchSize value 1');
+            worker.postMessage('isready');
+          } catch (err) {
+            onInitError(err);
+          }
+          return;
+        }
+        if (text === 'readyok') {
+          if (done) return;
+          done = true;
+          cleanup();
+          resolve();
+        }
+      };
+
+      worker.addEventListener('message', onInitMessage);
+      worker.addEventListener('error', onInitError);
+      worker.postMessage('uci');
+    });
+
+    localMaiaLoadedElo = elo;
+    worker.addEventListener('message', onLocalMaiaMessage);
+    worker.addEventListener('error', onLocalMaiaError);
+    return worker;
+  })().catch((err) => {
+    releaseLocalMaiaEngine();
+    throw err;
+  }).finally(() => {
+    localMaiaInitPromise = null;
+  });
+
+  return localMaiaInitPromise;
+}
+
+async function runLocalMaiaEval(fen, _queryDepth, signal) {
+  const worker = await ensureLocalMaiaEngine();
+  if (!worker) return null;
+
+  if (localMaiaCurrentSearch && !localMaiaCurrentSearch.done) {
+    try { worker.postMessage('stop'); } catch {}
+    clearLocalMaiaSearch(null);
+  }
+
+  const turn = fen.split(' ')[1] || 'w';
+  const elo = normalizeMaiaElo(maiaElo);
+
+  return new Promise((resolve, reject) => {
+    const search = {
+      id: ++localMaiaSearchId,
+      done: false,
+      turn,
+      elo,
+      linesByPv: new Map(),
+      timeoutId: 0,
+      signal,
+      abortHandler: null,
+      resolve,
+      reject,
+    };
+    localMaiaCurrentSearch = search;
+
+    search.timeoutId = setTimeout(() => {
+      try { worker.postMessage('stop'); } catch {}
+      clearLocalMaiaSearch(null);
+    }, MAIA_LOCAL_SEARCH_TIMEOUT_MS);
+
+    if (signal) {
+      search.abortHandler = () => {
+        try { worker.postMessage('stop'); } catch {}
+        clearLocalMaiaSearch(null, { aborted: true });
+      };
+      if (signal.aborted) {
+        search.abortHandler();
+        return;
+      }
+      signal.addEventListener('abort', search.abortHandler, { once: true });
+    }
+
+    try {
+      worker.postMessage(`position fen ${fen}`);
+      worker.postMessage('go nodes 1');
+    } catch (err) {
+      clearLocalMaiaSearch(null);
+    }
+  });
+}
+
 function getEvalFenCacheToken(fen) {
   if (typeof fen !== 'string') return String(fen || '');
   const parts = fen.trim().split(/\s+/);
@@ -2721,22 +2962,23 @@ function getEvalFenCacheToken(fen) {
   return `${parts[0]} ${turn} ${castling} ${enPassant}`;
 }
 
-function getEvalCacheKey(fen, depth) {
-  return `${depth}|${getEvalFenCacheToken(fen)}`;
+function getEvalCacheKey(fen, depth, engineToken = getActiveEvalEngineCacheToken()) {
+  return `${engineToken}|${depth}|${getEvalFenCacheToken(fen)}`;
 }
 
-function getCachedEval(fen, depth) {
-  const entry = evalCache.get(getEvalCacheKey(fen, depth));
+function getCachedEval(fen, depth, engineToken = getActiveEvalEngineCacheToken()) {
+  const key = getEvalCacheKey(fen, depth, engineToken);
+  const entry = evalCache.get(key);
   if (!entry) return null;
   if (now() - entry.ts > EVAL_CACHE_TTL) {
-    evalCache.delete(getEvalCacheKey(fen, depth));
+    evalCache.delete(key);
     return null;
   }
   return entry.value;
 }
 
-function setCachedEval(fen, depth, value) {
-  evalCache.set(getEvalCacheKey(fen, depth), { ts: now(), value });
+function setCachedEval(fen, depth, value, engineToken = getActiveEvalEngineCacheToken()) {
+  evalCache.set(getEvalCacheKey(fen, depth, engineToken), { ts: now(), value });
 }
 
 function clearPuzzleRushDepthFallback() {
@@ -2877,7 +3119,9 @@ async function fetchJsonWithStatus(url, { signal, headers, timeoutMs, abortKey }
 
 async function fetchEval(fen) {
   const queryDepth = getEvalQueryDepth(fen);
-  const cached = getCachedEval(fen, queryDepth);
+  const activeEngineId = getActiveEvalEngineId();
+  const engineToken = getActiveEvalEngineCacheToken(activeEngineId);
+  const cached = getCachedEval(fen, queryDepth, engineToken);
   if (cached) {
     registerEvalSuccess();
     return cached;
@@ -2930,11 +3174,29 @@ async function fetchEval(fen) {
   };
   const allowApiFallback = stockfishProvider === 'api' || stockfishProvider === 'local';
 
+  if (activeEngineId === 'maia') {
+    releaseLocalStockfishEngine();
+    try {
+      const maiaResult = await runLocalMaiaEval(fen, queryDepth, signal);
+      if (maiaResult) {
+        setCachedEval(fen, queryDepth, maiaResult, engineToken);
+        registerEvalSuccess();
+        return maiaResult;
+      }
+    } catch (e) {
+      if (e?.name === 'AbortError') return null;
+      releaseLocalMaiaEngine();
+    }
+  } else {
+    releaseLocalMaiaEngine();
+  }
+
   if (isLocalStockfishProvider()) {
     try {
       const localResult = await runLocalStockfishEval(fen, queryDepth, signal);
       if (localResult) {
-        setCachedEval(fen, queryDepth, localResult);
+        localResult.engine = activeEngineId === 'maia' ? 'stockfish-fallback' : 'stockfish';
+        setCachedEval(fen, queryDepth, localResult, engineToken);
         registerEvalSuccess();
         return localResult;
       }
@@ -3003,9 +3265,10 @@ async function fetchEval(fen) {
               mate: turn === 'w' ? data.mate : -data.mate,
               bestMove,
               topMoves,
-              pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: null, mate: idx === 0 ? data.mate : null }))
+              pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: null, mate: idx === 0 ? data.mate : null })),
+              engine: activeEngineId === 'maia' ? 'stockfish-api-fallback' : 'stockfish-api',
             };
-            setCachedEval(fen, queryDepth, result);
+            setCachedEval(fen, queryDepth, result, engineToken);
             registerEvalSuccess();
             return result;
           }
@@ -3017,9 +3280,10 @@ async function fetchEval(fen) {
               mate: null,
               bestMove,
               topMoves,
-              pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: idx === 0 ? cp : null, mate: null }))
+              pvLines: topMoves.map((m, idx) => ({ moves: [m], cp: idx === 0 ? cp : null, mate: null })),
+              engine: activeEngineId === 'maia' ? 'stockfish-api-fallback' : 'stockfish-api',
             };
-            setCachedEval(fen, queryDepth, result);
+            setCachedEval(fen, queryDepth, result, engineToken);
             registerEvalSuccess();
             return result;
           }
@@ -3504,6 +3768,7 @@ function applySavedGuiAndModuleState() {
     if (saved.settings.stockfishProvider === 'local' || saved.settings.stockfishProvider === 'api') {
       stockfishProvider = saved.settings.stockfishProvider;
     }
+    if (Number.isFinite(saved.settings.maiaElo)) maiaElo = normalizeMaiaElo(saved.settings.maiaElo);
     if (saved.settings.automoveMode === 'legit' || saved.settings.automoveMode === 'blatant') automoveMode = saved.settings.automoveMode;
     if (Number.isFinite(saved.settings.automoveDelayMin)) automoveDelayMin = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMin)));
     if (Number.isFinite(saved.settings.automoveDelayMax)) automoveDelayMax = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMax)));
@@ -3574,6 +3839,7 @@ function reloadStockfishConnection(reason = 'manual-ui', forceTick = true) {
     evalAbortController = null;
   }
   releaseLocalStockfishEngine();
+  releaseLocalMaiaEngine();
   evalCache.clear();
   evalRequestSeq++;
   clearAutomoveSchedule();
@@ -3623,6 +3889,7 @@ function stopEvalEngine() {
     evalUpdateInterval = null;
   }
   releaseLocalStockfishEngine();
+  releaseLocalMaiaEngine();
   evalTickIntervalMs = 0;
   resetStockfishFailureTracking();
   clearPuzzleRushDepthFallback();
@@ -3771,7 +4038,9 @@ function cseRenderGui() {
     const sfStatusClass = stockfishFailureStreak === 0 ? 'cse-sf-status-ok' : 'cse-sf-status-err';
     const activeSettingsSection = cseGuiState.settingsSection || 'general';
     const isLocalProvider = stockfishProvider === 'local';
-    const providerLabel = isLocalProvider ? 'Local' : 'API';
+    const activeEngineId = getActiveEvalEngineId();
+    const providerLabel = getActiveEvalEngineLabel(activeEngineId);
+    const normalizedMaiaElo = normalizeMaiaElo(maiaElo);
 
     const SVG_SF    = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
     const SVG_GEN   = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
@@ -3791,7 +4060,7 @@ function cseRenderGui() {
       <div class="cse-mc-settings-sidebar">
         <div class="cse-mc-ss-item ${activeSettingsSection === 'stockfish' ? 'cse-mc-ss-active' : ''}" data-section="stockfish">
           <div class="cse-mc-ss-icon" style="background:rgba(74,158,92,0.13);color:#4a9e5c;">${SVG_SF}</div>
-          <div class="cse-mc-ss-text"><div class="cse-mc-ss-title">Stockfish</div><div class="cse-mc-ss-sub">Engine settings</div></div>
+          <div class="cse-mc-ss-text"><div class="cse-mc-ss-title">Engines</div><div class="cse-mc-ss-sub">Stockfish and Maia</div></div>
         </div>
         <div class="cse-mc-ss-item ${activeSettingsSection === 'general' ? 'cse-mc-ss-active' : ''}" data-section="general">
           <div class="cse-mc-ss-icon" style="background:rgba(155,155,187,0.1);color:#9b9bbb;">${SVG_GEN}</div>
@@ -3814,7 +4083,7 @@ function cseRenderGui() {
         ${activeSettingsSection === 'stockfish' ? `
           <div class="cse-mc-sc-header">
             <div class="cse-mc-sc-icon" style="background:rgba(74,158,92,0.15);color:#4a9e5c;">${SVG_SFBIG}</div>
-            <span class="cse-mc-sc-title">Stockfish</span>
+            <span class="cse-mc-sc-title">Engines</span>
             <span class="cse-mc-sc-badge cse-mc-sc-enabled">${providerLabel}</span>
             <div style="flex:1"></div>
             <span class="cse-mc-sc-info" title="Info">${SVG_ABOUT}</span>
@@ -3857,7 +4126,7 @@ function cseRenderGui() {
 
             <div class="cse-gs-block">
               <div class="cse-gs-block-kicker">ENGINE PROVIDER</div>
-              <div class="cse-gs-block-desc">Choose how Stockfish is used to analyze positions.</div>
+              <div class="cse-gs-block-desc">Choose how Stockfish is used outside Maia legit mode.</div>
               <div class="cse-gs-provider-grid">
                 <button class="cse-gs-provider-card ${isLocalProvider ? 'cse-gs-provider-active' : ''}" data-provider="local" type="button">
                   <span class="cse-gs-provider-radio" aria-hidden="true"></span>
@@ -3883,7 +4152,7 @@ function cseRenderGui() {
               </div>
               <div class="cse-gs-note">
                 <span class="cse-gs-note-icon">i</span>
-                <span>You can change this at any time. Some features may behave differently depending on the provider.</span>
+                <span>AutoMove Legit uses Maia ${normalizedMaiaElo}; Blatant and Puzzle Rush use Stockfish.</span>
               </div>
             </div>
 
@@ -4164,11 +4433,19 @@ function cseRenderGui() {
       });
     }
 
-    card.querySelector('.cse-mc-fav').addEventListener('click', e => {
+    const favBtn = card.querySelector('.cse-mc-fav');
+    favBtn.addEventListener('click', e => {
       e.stopPropagation();
-      cseGuiState.favorites[mod.id] = !cseGuiState.favorites[mod.id];
-      cseSaveState();
-      cseRenderGui();
+      const willBeFavorite = !cseGuiState.favorites[mod.id];
+      favBtn.style.pointerEvents = 'none';
+      favBtn.classList.remove('cse-fav-anim-add', 'cse-fav-anim-remove');
+      void favBtn.offsetWidth;
+      favBtn.classList.add(willBeFavorite ? 'cse-fav-anim-add' : 'cse-fav-anim-remove');
+      setTimeout(() => {
+        cseGuiState.favorites[mod.id] = willBeFavorite;
+        cseSaveState();
+        cseRenderGui();
+      }, 260);
     });
 
     grid.appendChild(card);
@@ -4316,6 +4593,14 @@ function cseRenderSettingsPanel(modId) {
             <button class="cse-mc-mbtn ${automoveMode === 'legit' ? 'cse-mc-mbtn-on' : ''}" data-mode="legit">Legit</button>
             <button class="cse-mc-mbtn ${automoveMode === 'blatant' ? 'cse-mc-mbtn-on' : ''}" data-mode="blatant">Blatant</button>
           </div>
+          <div class="cse-mc-engine-hint" id="cse-sp-engine-hint">
+            ${automoveMode === 'legit' ? `Legit engine: Maia ${normalizeMaiaElo(maiaElo)}` : 'Blatant engine: Stockfish'}
+          </div>
+        </div>
+        <div class="cse-mc-srow">
+          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Maia ELO</span><span class="cse-mc-sval" id="cse-sp-maia-elo-val">${normalizeMaiaElo(maiaElo)}</span></div>
+          <input type="range" class="cse-mc-slider" id="cse-sp-maia-elo" min="${MAIA_ELO_MIN}" max="${MAIA_ELO_MAX}" step="${MAIA_ELO_STEP}" value="${normalizeMaiaElo(maiaElo)}">
+          <div class="cse-mc-engine-hint">Used by Legit. Blatant and Puzzle Rush always stay on Stockfish.</div>
         </div>
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay min</span><span class="cse-mc-sval" id="cse-sp-dmin-val">${automoveDelayMin}s</span></div>
@@ -4488,14 +4773,52 @@ function cseRenderSettingsPanel(modId) {
   });
 
   if (isAuto) {
+    const syncAutoEngineHint = () => {
+      const hint = ov.querySelector('#cse-sp-engine-hint');
+      if (hint) {
+        hint.textContent = automoveMode === 'legit'
+          ? `Legit engine: Maia ${normalizeMaiaElo(maiaElo)}`
+          : 'Blatant engine: Stockfish';
+      }
+    };
     ov.querySelectorAll('.cse-mc-mbtn').forEach(btn => {
       btn.addEventListener('click', () => {
         automoveMode = btn.dataset.mode;
         ov.querySelectorAll('.cse-mc-mbtn').forEach(b => b.classList.toggle('cse-mc-mbtn-on', b.dataset.mode === automoveMode));
+        evalCache.clear();
+        lastEvalFen = null;
+        lastEvalMoveSourceFen = null;
+        currentBestMove = null;
+        lastEvalTopMoves = [];
+        lastEvalPvLines = [];
+        lastEvalMate = null;
         cseSaveState();
+        syncAutoEngineHint();
         updateAutomoveModeUI();
+        ensureEvalEngineState(true);
       });
     });
+
+    const maiaEloSl = ov.querySelector('#cse-sp-maia-elo');
+    if (maiaEloSl) {
+      maiaEloSl.addEventListener('input', () => {
+        const nextElo = normalizeMaiaElo(parseInt(maiaEloSl.value, 10));
+        maiaElo = nextElo;
+        maiaEloSl.value = String(nextElo);
+        ov.querySelector('#cse-sp-maia-elo-val').textContent = String(nextElo);
+        releaseLocalMaiaEngine();
+        evalCache.clear();
+        lastEvalFen = null;
+        lastEvalMoveSourceFen = null;
+        currentBestMove = null;
+        lastEvalTopMoves = [];
+        lastEvalPvLines = [];
+        lastEvalMate = null;
+        cseSaveState();
+        syncAutoEngineHint();
+        ensureEvalEngineState(true);
+      });
+    }
 
     const dminSl = ov.querySelector('#cse-sp-dmin');
     const dmaxSl = ov.querySelector('#cse-sp-dmax');

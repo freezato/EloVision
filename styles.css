@@ -1923,8 +1923,26 @@
   transition: color 0.15s, transform 0.18s cubic-bezier(.2,.8,.3,1);
 }
 .cse-mc-fav.cse-mc-fav-on {
-  animation: cse-scale-in 0.3s cubic-bezier(.2,1.6,.3,1) both;
   filter: drop-shadow(0 0 6px rgba(240,192,64,0.5));
+}
+.cse-mc-fav.cse-fav-anim-add {
+  animation: cse-fav-add 0.26s cubic-bezier(.18,1.1,.28,1) both;
+}
+.cse-mc-fav.cse-fav-anim-remove {
+  animation: cse-fav-remove 0.26s cubic-bezier(.35,.05,.65,.95) both;
+}
+
+@keyframes cse-fav-add {
+  0%   { transform: scale(1) rotate(0deg); color: #8f8f8f; filter: drop-shadow(0 0 0 rgba(240,192,64,0)); }
+  45%  { transform: scale(1.55) rotate(-10deg); color: #ffd35f; filter: drop-shadow(0 0 11px rgba(240,192,64,0.8)); }
+  70%  { transform: scale(0.92) rotate(8deg); }
+  100% { transform: scale(1.15) rotate(0deg); color: #f0c040; filter: drop-shadow(0 0 7px rgba(240,192,64,0.55)); }
+}
+@keyframes cse-fav-remove {
+  0%   { transform: scale(1.15) rotate(0deg); color: #f0c040; filter: drop-shadow(0 0 7px rgba(240,192,64,0.55)); opacity: 1; }
+  40%  { transform: scale(0.76) rotate(12deg); color: #d79b3f; opacity: 0.92; }
+  75%  { transform: scale(1.04) rotate(-8deg); color: #8a8a8a; opacity: 0.8; }
+  100% { transform: scale(1) rotate(0deg); color: #555; filter: drop-shadow(0 0 0 rgba(240,192,64,0)); opacity: 0.7; }
 }
 
 /* Settings sidebar item: slide right on hover */
