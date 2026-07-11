@@ -1,5 +1,7 @@
 (function () {
-  const QUALITY = {
+  'use strict';
+
+  const QUALITY = Object.freeze({
     brilliant: { label: 'Brilliant', icon: '!!' },
     great: { label: 'Great', icon: '!' },
     best: { label: 'Best', icon: '★' },
@@ -9,7 +11,9 @@
     mistake: { label: 'Mistake', icon: '?' },
     blunder: { label: 'Blunder', icon: '??' },
     pending: { label: 'Analysing', icon: '…' },
-  };
+  });
+  const MAX_EVALS = 48;
+  const MAX_BADGES = 48;
 
   const state = {
     enabled: false,
@@ -17,28 +21,24 @@
     recapShownForToken: null,
     evalByFen: new Map(),
     analysedMoveKeys: new Set(),
-    badgeRecords: new Map(),
+    badgeByPly: new Map(),
     lastObservedPly: null,
+    syncFrame: 0,
     stats: createEmptyStats(),
   };
 
   function createEmptyStats() {
     return {
-      moveCount: 0,
-      avgCpl: 0,
-      totalCpl: 0,
-      brilliant: 0,
-      great: 0,
-      best: 0,
-      good: 0,
-      ok: 0,
-      inaccuracy: 0,
-      mistake: 0,
-      blunder: 0,
-      tacticalFlags: 0,
+      moveCount: 0, avgCpl: 0, totalCpl: 0,
+      brilliant: 0, great: 0, best: 0, good: 0, ok: 0,
+      inaccuracy: 0, mistake: 0, blunder: 0, tacticalFlags: 0,
       phase: { opening: 0, middlegame: 0, endgame: 0 },
       lastMove: null,
     };
+  }
+
+  function trimMap(map, max) {
+    while (map.size > max) map.delete(map.keys().next().value);
   }
 
   function normalizeTurn(value) {
@@ -74,8 +74,6 @@
     return String.fromCharCode(97 + col) + String(8 - row);
   }
 
-  // A move is inferred from the two board states so analysis also works when
-  // chess.com's notation DOM has not settled yet. Castling and promotion are covered.
   function inferUciFromFens(beforeFen, afterFen) {
     const before = expandBoard(beforeFen);
     const after = expandBoard(afterFen);
@@ -91,8 +89,8 @@
     const from = changes.find(c => own(c.before) && !own(c.after));
     const to = changes.find(c => own(c.after) && (!own(c.before) || c.before !== c.after));
     if (!from || !to) return null;
-    let promotion = '';
-    if (String(from.before).toLowerCase() === 'p' && String(to.after).toLowerCase() !== 'p') promotion = String(to.after).toLowerCase();
+    const promotion = String(from.before).toLowerCase() === 'p' && String(to.after).toLowerCase() !== 'p'
+      ? String(to.after).toLowerCase() : '';
     return squareAt(from.row, from.col) + squareAt(to.row, to.col) + promotion;
   }
 
@@ -102,17 +100,17 @@
 
   function materialFor(fen, color) {
     return Array.from(boardPart(fen)).reduce((sum, piece) => {
-      const belongsToColor = color === 'w' ? piece === piece.toUpperCase() : piece === piece.toLowerCase();
-      return belongsToColor ? sum + materialValue(piece) : sum;
+      const belongs = color === 'w' ? piece === piece.toUpperCase() : piece === piece.toLowerCase();
+      return belongs ? sum + materialValue(piece) : sum;
     }, 0);
   }
 
-  function materialPhaseFromFen(fen, fallbackPly) {
+  function phaseFromFen(fen, ply) {
     const board = boardPart(fen);
-    if (!board) return Number.isFinite(fallbackPly) && fallbackPly <= 16 ? 'opening' : 'middlegame';
+    if (!board) return Number.isFinite(ply) && ply <= 16 ? 'opening' : 'middlegame';
     const heavy = (board.match(/[qQrR]/g) || []).length;
     const minors = (board.match(/[bBnN]/g) || []).length;
-    if (heavy >= 7 || minors >= 8 || (Number.isFinite(fallbackPly) && fallbackPly <= 16)) return 'opening';
+    if (heavy >= 7 || minors >= 8 || (Number.isFinite(ply) && ply <= 16)) return 'opening';
     return heavy <= 2 && minors <= 3 ? 'endgame' : 'middlegame';
   }
 
@@ -121,9 +119,9 @@
       return mover === 'w' ? Math.max(0, before.cp - after.cp) : Math.max(0, after.cp - before.cp);
     }
     if (Number.isFinite(before.mate) || Number.isFinite(after.mate)) {
-      const beforeScore = Number.isFinite(before.mate) ? (mover === 'w' ? before.mate : -before.mate) : 0;
-      const afterScore = Number.isFinite(after.mate) ? (mover === 'w' ? after.mate : -after.mate) : 0;
-      return Math.max(0, beforeScore - afterScore) * 1000;
+      const a = Number.isFinite(before.mate) ? (mover === 'w' ? before.mate : -before.mate) : 0;
+      const b = Number.isFinite(after.mate) ? (mover === 'w' ? after.mate : -after.mate) : 0;
+      return Math.max(0, a - b) * 1000;
     }
     return null;
   }
@@ -131,8 +129,8 @@
   function classifyMove({ cpl, uci, bestMove, beforeFen, afterFen, mover }) {
     if (!Number.isFinite(cpl)) return null;
     const playedBest = !!uci && !!bestMove && uci === bestMove;
-    const sacrificedMaterial = materialFor(afterFen, mover) <= materialFor(beforeFen, mover) - 2;
-    if (playedBest && sacrificedMaterial && cpl <= 15) return 'brilliant';
+    const sacrificed = materialFor(afterFen, mover) <= materialFor(beforeFen, mover) - 2;
+    if (playedBest && sacrificed && cpl <= 15) return 'brilliant';
     if (playedBest) return 'best';
     if (cpl <= 8) return 'great';
     if (cpl <= 25) return 'good';
@@ -145,19 +143,19 @@
   function reset() {
     state.evalByFen.clear();
     state.analysedMoveKeys.clear();
-    state.badgeRecords.clear();
+    state.badgeByPly.clear();
     state.lastObservedPly = null;
     state.stats = createEmptyStats();
+    if (state.syncFrame) cancelAnimationFrame(state.syncFrame);
+    state.syncFrame = 0;
     document.querySelectorAll('.cse-move-quality').forEach(el => el.remove());
     removeRecap();
   }
 
   function setEnabled(enabled) {
     state.enabled = !!enabled;
-    if (!state.enabled) {
-      document.querySelectorAll('.cse-move-quality').forEach(el => el.remove());
-      removeRecap();
-    }
+    if (!state.enabled) reset();
+    else scheduleBadgeSync();
   }
 
   function handleGameTransition(token) {
@@ -170,8 +168,6 @@
 
   function handleEval(snapshot) {
     if (!state.enabled || !snapshot || typeof snapshot !== 'object') return;
-    // A rematch can keep the same route, so a return to the opening is a
-    // reliable signal that this is a new game.
     if (Number.isFinite(snapshot.ply)) {
       if (Number.isFinite(state.lastObservedPly) && snapshot.ply + 1 < state.lastObservedPly) reset();
       state.lastObservedPly = snapshot.ply;
@@ -182,80 +178,71 @@
         mate: Number.isFinite(snapshot.mate) ? snapshot.mate : null,
         bestMove: typeof snapshot.bestMove === 'string' ? snapshot.bestMove.toLowerCase() : null,
       });
-      if (state.evalByFen.size > 220) state.evalByFen.delete(state.evalByFen.keys().next().value);
+      trimMap(state.evalByFen, MAX_EVALS);
     }
-    syncMoveBadges();
+    scheduleBadgeSync();
     if (snapshot.gameOver && state.gameToken && state.recapShownForToken !== state.gameToken) {
       state.recapShownForToken = state.gameToken;
-      window.setTimeout(showRecap, 0);
+      setTimeout(showRecap, 0);
     }
   }
 
-  function getNotationTextNodes() {
-    const raw = Array.from(document.querySelectorAll(
-      '.move-text-component, [class*="move-text"], .move-node-component, .move-node'
-    ));
-    // A move node often contains another move node after a chess.com DOM update.
-    // Keeping only the innermost node gives one item per half-move, not duplicates.
-    return raw.filter(node => !raw.some(other => other !== node && node.contains?.(other)));
-  }
-
-  function findNotationMove(ply) {
-    if (!Number.isFinite(ply) || ply < 1) return null;
-    const byPly = ['data-ply', 'data-ply-index', 'data-move-index'];
-    for (const attr of byPly) {
-      // Chess.com has used both zero- and one-based values for these attributes.
-      const exact = Array.from(document.querySelectorAll(`[${attr}]`))
-        .filter(el => [ply, ply - 1].includes(Number(el.getAttribute(attr))))
-        .reverse();
-      for (const el of exact) {
-        const text = el.querySelector('.move-text-component, [class*="move-text"]');
-        if (text || el.textContent?.trim()) return text || el;
-      }
-    }
-    return getNotationTextNodes()[ply - 1] || null;
-  }
-
-  function renderBadge(record) {
-    if (!state.enabled || !record || !QUALITY[record.bucket]) return false;
-    const target = findNotationMove(record.ply);
-    if (!target) return false;
-    const existing = target.querySelector?.('.cse-move-quality');
-    if (existing?.dataset.cseBucket === record.bucket) return true;
-    if (existing) existing.remove?.();
-    const quality = QUALITY[record.bucket];
-    const badge = document.createElement('span');
-    badge.className = `cse-move-quality cse-quality-${record.bucket}`;
-    badge.dataset.cseBucket = record.bucket;
-    badge.textContent = quality.icon;
-    badge.title = `${quality.label}${Number.isFinite(record.cpl) ? ` (${record.cpl} CPL)` : ''}`;
-    target.appendChild(badge);
-    return true;
+  function getNotationMoves() {
+    const selectors = '.move-text-component, [class*="move-text"], .move-node-component, .move-node';
+    const scopes = document.querySelectorAll('.vertical-move-list, .vertical-move-list-component, .move-list, [data-cy="move-list"], .notation-window');
+    const scope = scopes.length ? scopes[scopes.length - 1] : document;
+    const nodes = Array.from(scope.querySelectorAll(selectors));
+    const seen = new Set();
+    return nodes.filter(node => {
+      const target = node.matches?.('.move-text-component, [class*="move-text"]')
+        ? node : node.querySelector?.('.move-text-component, [class*="move-text"]') || node;
+      if (!target || seen.has(target)) return false;
+      seen.add(target);
+      return true;
+    }).map(node => node.matches?.('.move-text-component, [class*="move-text"]')
+      ? node : node.querySelector?.('.move-text-component, [class*="move-text"]') || node);
   }
 
   function syncMoveBadges() {
-    state.badgeRecords.forEach(renderBadge);
+    if (!state.enabled) return;
+    const moves = getNotationMoves();
+    for (const [ply, record] of state.badgeByPly) {
+      const target = moves[ply - 1];
+      if (!target || !QUALITY[record.bucket]) continue;
+      let badge = target.querySelector?.(':scope > .cse-move-quality');
+      const quality = QUALITY[record.bucket];
+      if (!badge) {
+        badge = document.createElement('span');
+        target.appendChild(badge);
+      }
+      badge.className = `cse-move-quality cse-quality-${record.bucket}`;
+      badge.dataset.cseBucket = record.bucket;
+      badge.textContent = quality.icon;
+      badge.title = `${quality.label}${Number.isFinite(record.cpl) ? ` (${record.cpl} CPL)` : ''}`;
+    }
+  }
+
+  function scheduleBadgeSync() {
+    if (!state.enabled || state.syncFrame) return;
+    state.syncFrame = requestAnimationFrame(() => {
+      state.syncFrame = 0;
+      syncMoveBadges();
+    });
   }
 
   function handlePositionChange(snapshot) {
-    if (!state.enabled || !snapshot?.fenBefore || !snapshot?.fenAfter) return;
-    const key = `${snapshot.fenBefore}>${snapshot.fenAfter}`;
-    const record = state.badgeRecords.get(key) || {
-      ply: Number.isFinite(snapshot.ply) ? snapshot.ply : null,
-      cpl: null,
-      bucket: 'pending',
-    };
-    // The placeholder appears on the new notation entry immediately, then is
-    // replaced in-place once Stockfish returns the position evaluation.
-    record.ply = Number.isFinite(snapshot.ply) ? snapshot.ply : record.ply;
-    state.badgeRecords.set(key, record);
-    renderBadge(record);
+    if (!state.enabled || !snapshot?.fenBefore || !snapshot?.fenAfter || !Number.isFinite(snapshot.ply)) return;
+    if (!state.badgeByPly.has(snapshot.ply)) {
+      state.badgeByPly.set(snapshot.ply, { ply: snapshot.ply, cpl: null, bucket: 'pending' });
+      trimMap(state.badgeByPly, MAX_BADGES);
+    }
+    scheduleBadgeSync();
   }
 
   function handleMove(snapshot) {
-    if (!state.enabled || !snapshot || typeof snapshot !== 'object') return;
-    const key = `${snapshot.fenBefore || ''}>${snapshot.fenAfter || ''}`;
-    if (!snapshot.fenBefore || !snapshot.fenAfter || state.analysedMoveKeys.has(key)) return;
+    if (!state.enabled || !snapshot?.fenBefore || !snapshot?.fenAfter) return;
+    const key = `${snapshot.fenBefore}>${snapshot.fenAfter}`;
+    if (state.analysedMoveKeys.has(key)) return;
     const before = state.evalByFen.get(snapshot.fenBefore);
     const after = state.evalByFen.get(snapshot.fenAfter);
     const mover = getFenTurn(snapshot.fenBefore);
@@ -264,22 +251,23 @@
     const cpl = evaluationLoss(before, after, mover);
     const uci = (snapshot.uci || inferUciFromFens(snapshot.fenBefore, snapshot.fenAfter) || '').toLowerCase() || null;
     const bucket = classifyMove({ cpl, uci, bestMove: before.bestMove, beforeFen: snapshot.fenBefore, afterFen: snapshot.fenAfter, mover });
-    if (!bucket) return;
+    if (!bucket || !Number.isFinite(snapshot.ply)) return;
 
     state.analysedMoveKeys.add(key);
+    if (state.analysedMoveKeys.size > MAX_BADGES) state.analysedMoveKeys.delete(state.analysedMoveKeys.values().next().value);
     const s = state.stats;
     s.moveCount += 1;
     s.totalCpl += cpl;
     s.avgCpl = s.totalCpl / s.moveCount;
     s[bucket] += 1;
-    const phase = materialPhaseFromFen(snapshot.fenAfter, snapshot.ply);
+    const phase = phaseFromFen(snapshot.fenAfter, snapshot.ply);
     s.phase[phase] += 1;
     if (bucket === 'brilliant' || bucket === 'blunder' || cpl >= 170) s.tacticalFlags += 1;
-    const record = { ply: Number.isFinite(snapshot.ply) ? snapshot.ply : null, cpl: Math.round(cpl), bucket, uci, phase };
+    const record = { ply: snapshot.ply, cpl: Math.round(cpl), bucket, uci, phase };
     s.lastMove = record;
-    state.badgeRecords.set(key, record);
-    renderBadge(record);
-    window.setTimeout(syncMoveBadges, 250);
+    state.badgeByPly.set(snapshot.ply, record);
+    trimMap(state.badgeByPly, MAX_BADGES);
+    scheduleBadgeSync();
   }
 
   function getLiveStats() {
@@ -302,7 +290,7 @@
       <div class="cse-gi-recap-head"><strong>Game analysis</strong><button type="button" aria-label="Close">×</button></div>
       <div class="cse-gi-recap-meta">${s.moveCount} analysed moves · ${s.avgCpl} average CPL</div>
       <div class="cse-gi-quality-grid">
-        ${['brilliant', 'great', 'best', 'good', 'ok', 'inaccuracy', 'mistake', 'blunder'].map(key => `<div class="cse-gi-quality-row cse-quality-${key}"><span>${QUALITY[key].icon} ${QUALITY[key].label}</span><b>${s[key]}</b></div>`).join('')}
+        ${['brilliant','great','best','good','ok','inaccuracy','mistake','blunder'].map(key => `<div class="cse-gi-quality-row cse-quality-${key}"><span>${QUALITY[key].icon} ${QUALITY[key].label}</span><b>${s[key]}</b></div>`).join('')}
       </div>`;
     document.body.appendChild(wrap);
     wrap.querySelector('button')?.addEventListener('click', removeRecap);
@@ -310,7 +298,6 @@
 
   window.CSEGameInsights = {
     init() {}, setEnabled, handleEval, handleMove, handlePositionChange,
-    handleGameTransition, getLiveStats, reset,
-    flushPendingBadges: syncMoveBadges,
+    handleGameTransition, getLiveStats, reset, flushPendingBadges: scheduleBadgeSync,
   };
 })();
