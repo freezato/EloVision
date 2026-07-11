@@ -268,6 +268,12 @@
     state.badgeByPly.set(snapshot.ply, record);
     trimMap(state.badgeByPly, MAX_BADGES);
     scheduleBadgeSync();
+    if (bucket === 'mistake' || bucket === 'blunder') {
+      window.CSENotify?.('analysisWarning', QUALITY[bucket].icon + ' ' + QUALITY[bucket].label, Math.round(cpl) + ' CPL on move ' + snapshot.ply, {
+        id: 'analysis-' + snapshot.ply,
+        cooldown: 250,
+      });
+    }
   }
 
   function getLiveStats() {
