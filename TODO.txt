@@ -9,5 +9,4 @@
 [DONE] Aggiungere la chat tossica automatica, con opzione di scegliere a scelta il messaggio da inviare a fine partita;
 [DONE] Fixare "fast in opening", attualmente ogni mossa viene svolta in 1 secondo, anche dalla nona in poi;------------------------
 
-[FIX] Game Insights mostra tutto 0
-[TODO] Fix maia gui
+[FIX] Le notifiche mettile che si può scegliere la posizione (di default in basso a destra). il game-insight deve mostrare un icona accanto alla mossa fatta che dica se sia top o no o blunder o altro.
