@@ -38,6 +38,7 @@ let evalUpdateInterval = null;
 let evalTickIntervalMs = 0;
 let lastEvalFen = null;
 let lastEvalMoveSourceFen = null;
+let lastGameInsightsFen = null;
 let currentBestMove = null;
 let lastEvalTopMoves = [];
 let lastEvalPvLines = [];
@@ -48,6 +49,7 @@ let maiaElo = 1500;
 let generalLanguage = 'en'; // 'en' | 'it'
 let generalNumbersFormat = 'default'; // 'default' | 'eu'
 let generalMinimizeToTray = true;
+let uiTheme = 'aurora'; // 'aurora' | 'blockforge' | 'voidos'
 let evalBarDisplayMode = 'bar'; // 'bar' | 'percent'
 let stockfishFailureStreak = 0;
 let stockfishFailureSinceAt = 0;
@@ -154,6 +156,7 @@ function cseSaveState() {
       generalLanguage,
       generalNumbersFormat,
       generalMinimizeToTray,
+      uiTheme,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -3656,6 +3659,7 @@ function setBestMove(bestMove) {
 function cpToWhitePct(cp) {
   // cp is raw centipawns (e.g. 50 = half pawn). Sigmoid tuned to cp units.
   // Â±300cp = slight/moderate advantage, Â±800cp â‰ˆ decisive
+  if (!Number.isFinite(cp)) return 50;
   const pct = 50 + 50 * (2 / (1 + Math.exp(-cp / 200)) - 1);
   return Math.max(2, Math.min(98, pct));
 }
@@ -3700,7 +3704,7 @@ function updateEvalBarDisplay(result) {
     label = (m > 0 ? '+' : '-') + 'M' + Math.abs(m);
     cls = m > 0 ? 'cse-eval-white-adv' : 'cse-eval-black-adv';
   } else {
-    const cp = result.cp; // raw centipawns
+    const cp = Number.isFinite(result.cp) ? result.cp : 0; // raw centipawns, white perspective
     whitePct = cpToWhitePct(cp);
     const pawns = cp / 100;
     label = (pawns >= 0 ? '+' : '-') + Math.abs(pawns).toFixed(1);
@@ -3717,7 +3721,9 @@ function updateEvalBarDisplay(result) {
       const blackPct = 100 - whitePct;
       blackSeg.style.height = blackPct + '%';
       whiteSeg.style.height = whitePct + '%';
-      const displayLabel = evalBarDisplayMode === 'percent' ? Math.round(whitePct) + '%' : label;
+      // A sigmoid percentage is only a visual fill, not a real win probability.
+      // Always show the engine score so the compact mode cannot contradict the bar.
+      const displayLabel = label;
       scoreEl.textContent = displayLabel;
       scoreEl.className = 'cse-eval-score ' + cls;
     }
@@ -3795,7 +3801,15 @@ function applySavedGuiAndModuleState() {
       generalNumbersFormat = saved.settings.generalNumbersFormat;
     }
     generalMinimizeToTray = saved.settings.generalMinimizeToTray !== false;
+    if (['aurora', 'blockforge', 'voidos'].includes(saved.settings.uiTheme)) uiTheme = saved.settings.uiTheme;
   }
+}
+
+function applyUiTheme() {
+  const theme = ['aurora', 'blockforge', 'voidos'].includes(uiTheme) ? uiTheme : 'aurora';
+  document.documentElement.dataset.cseTheme = theme;
+  if (document.body) document.body.dataset.cseTheme = theme;
+  if (toolsModal?.isConnected) toolsModal.dataset.cseTheme = theme;
 }
 
 function getSavedEvalBarPosition() {
@@ -4206,9 +4220,32 @@ function cseRenderGui() {
 
             <div class="cse-gs-footer">${SVG_RLD} Changes are applied automatically.</div>
           </div>
-        ` : `
-          <div style="display:flex;align-items:center;justify-content:center;height:200px;color:#444;font-size:13px;">No settings available for this section.</div>
-        `}
+        ` : activeSettingsSection === 'appearance' ? `
+          <div class="cse-ap-page">
+            <div class="cse-gs-header"><div class="cse-gs-title">Appearance</div><div class="cse-gs-subtitle">Choose the client shell and tune its visual language.</div></div>
+            <div class="cse-ap-section-title">Interface theme</div>
+            <div class="cse-theme-grid">
+              <button class="cse-theme-card cse-theme-aurora ${uiTheme === 'aurora' ? 'is-selected' : ''}" data-ui-theme="aurora" type="button"><span class="cse-theme-mark">A</span><strong>Aurora</strong><small>Current Maia Chess</small><i>Modern · Emerald · Rounded</i></button>
+              <button class="cse-theme-card cse-theme-blockforge ${uiTheme === 'blockforge' ? 'is-selected' : ''}" data-ui-theme="blockforge" type="button"><span class="cse-theme-mark">▣</span><strong>BlockForge</strong><small>Voxel utility client</small><i>Pixel · Stone · Chunky</i></button>
+              <button class="cse-theme-card cse-theme-voidos ${uiTheme === 'voidos' ? 'is-selected' : ''}" data-ui-theme="voidos" type="button"><span class="cse-theme-mark">◇</span><strong>VoidOS</strong><small>Technical overlay</small><i>Neon · Angular · HUD</i></button>
+            </div>
+            <div class="cse-ap-layout">
+              <div class="cse-ap-controls">
+                <div class="cse-ap-section-title">UI controls</div>
+                <div class="cse-ap-row"><span><b>Accent color</b><small>Theme-native highlight</small></span><div class="cse-ap-swatches"><i></i><i></i><i></i><i></i><i></i></div></div>
+                <div class="cse-ap-row"><span><b>Interface density</b><small>Comfortable layout</small></span><select class="cse-gs-select"><option>Comfortable</option><option>Compact</option><option>Spacious</option></select></div>
+                <div class="cse-ap-row"><span><b>Motion</b><small>Transitions and feedback</small></span><label class="cse-gs-switch"><input type="checkbox" checked><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>
+                <div class="cse-ap-row"><span><b>Window scale</b><small>100%</small></span><input class="cse-mc-slider" type="range" min="80" max="120" value="100"></div>
+              </div>
+              <div class="cse-ap-preview"><div class="cse-ap-preview-label">Live preview</div><div class="cse-ap-mini-window"><div></div><span>MAIA CHESS</span><p>Module active</p><button>CONFIGURE</button></div></div>
+            </div>
+          </div>
+        ` : activeSettingsSection === 'notifications' ? `
+          <div class="cse-gs-page"><div class="cse-gs-header"><div class="cse-gs-title">Notifications</div><div class="cse-gs-subtitle">Choose which client events deserve your attention.</div></div>
+            <div class="cse-gs-block"><div class="cse-gs-block-kicker">EVENT MATRIX</div>${['Engine ready','Game finished','Opponent move','Analysis warning','Module update'].map((label, i) => `<div class="cse-gs-row"><div class="cse-gs-row-left"><span class="cse-gs-row-icon">${i + 1}</span><span><span class="cse-gs-row-title">${label}</span><span class="cse-gs-row-sub">In-client notification</span></span></div><label class="cse-gs-switch"><input type="checkbox" ${i < 3 ? 'checked' : ''}><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>`).join('')}</div></div>
+        ` : activeSettingsSection === 'about' ? `
+          <div class="cse-gs-page cse-about-page"><div class="cse-gs-header"><div class="cse-gs-title">About</div><div class="cse-gs-subtitle">Maia Chess utility client.</div></div><div class="cse-about-hero"><div class="cse-about-mark">♞</div><div><b>Maia Chess</b><span>Version 1.0.0 · ${uiTheme}</span><p>Analysis, automation and game insights in one configurable client.</p></div></div><div class="cse-gs-block"><div class="cse-gs-block-kicker">SYSTEM</div><div class="cse-about-meta"><span>Engine provider</span><b>${providerLabel}</b><span>Interface shell</span><b>${uiTheme}</b><span>State storage</span><b>Local</b></div></div></div>
+        ` : `<div class="cse-empty-settings">No settings available for this section.</div>`}
       </div>
     `;
 
@@ -4244,6 +4281,15 @@ function cseRenderGui() {
         stockfishProvider = provider;
         console.info(`[CSE] Stockfish provider switched: ${previousProvider} -> ${provider}`);
         reloadStockfishConnection('provider-change', true);
+        cseSaveState();
+        cseRenderGui();
+      });
+    });
+
+    grid.querySelectorAll('[data-ui-theme]').forEach(card => {
+      card.addEventListener('click', () => {
+        uiTheme = ['aurora', 'blockforge', 'voidos'].includes(card.dataset.uiTheme) ? card.dataset.uiTheme : 'aurora';
+        applyUiTheme();
         cseSaveState();
         cseRenderGui();
       });
@@ -4593,14 +4639,10 @@ function cseRenderSettingsPanel(modId) {
             <button class="cse-mc-mbtn ${automoveMode === 'legit' ? 'cse-mc-mbtn-on' : ''}" data-mode="legit">Legit</button>
             <button class="cse-mc-mbtn ${automoveMode === 'blatant' ? 'cse-mc-mbtn-on' : ''}" data-mode="blatant">Blatant</button>
           </div>
-          <div class="cse-mc-engine-hint" id="cse-sp-engine-hint">
-            ${automoveMode === 'legit' ? `Legit engine: Maia ${normalizeMaiaElo(maiaElo)}` : 'Blatant engine: Stockfish'}
-          </div>
         </div>
         <div class="cse-mc-srow">
-          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Maia ELO</span><span class="cse-mc-sval" id="cse-sp-maia-elo-val">${normalizeMaiaElo(maiaElo)}</span></div>
+          <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Maia strength</span><span class="cse-mc-sval" id="cse-sp-maia-elo-val">${normalizeMaiaElo(maiaElo)}</span></div>
           <input type="range" class="cse-mc-slider" id="cse-sp-maia-elo" min="${MAIA_ELO_MIN}" max="${MAIA_ELO_MAX}" step="${MAIA_ELO_STEP}" value="${normalizeMaiaElo(maiaElo)}">
-          <div class="cse-mc-engine-hint">Used by Legit. Blatant and Puzzle Rush always stay on Stockfish.</div>
         </div>
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay min</span><span class="cse-mc-sval" id="cse-sp-dmin-val">${automoveDelayMin}s</span></div>
@@ -4672,7 +4714,7 @@ function cseRenderSettingsPanel(modId) {
         <div class="cse-mc-srow cse-mc-check-row">
           <label class="cse-mc-check">
             <input type="checkbox" id="cse-sp-eval-percent" ${evalBarDisplayMode === 'percent' ? 'checked' : ''} style="accent-color:#4a9e5c;width:15px;height:15px;flex-shrink:0;margin-top:1px;">
-            <span>Show only numeric percentage</span>
+            <span>Compact numeric evaluation</span>
           </label>
         </div>
       ` : isDepth ? `
@@ -4773,14 +4815,6 @@ function cseRenderSettingsPanel(modId) {
   });
 
   if (isAuto) {
-    const syncAutoEngineHint = () => {
-      const hint = ov.querySelector('#cse-sp-engine-hint');
-      if (hint) {
-        hint.textContent = automoveMode === 'legit'
-          ? `Legit engine: Maia ${normalizeMaiaElo(maiaElo)}`
-          : 'Blatant engine: Stockfish';
-      }
-    };
     ov.querySelectorAll('.cse-mc-mbtn').forEach(btn => {
       btn.addEventListener('click', () => {
         automoveMode = btn.dataset.mode;
@@ -4793,7 +4827,6 @@ function cseRenderSettingsPanel(modId) {
         lastEvalPvLines = [];
         lastEvalMate = null;
         cseSaveState();
-        syncAutoEngineHint();
         updateAutomoveModeUI();
         ensureEvalEngineState(true);
       });
@@ -4815,7 +4848,6 @@ function cseRenderSettingsPanel(modId) {
         lastEvalPvLines = [];
         lastEvalMate = null;
         cseSaveState();
-        syncAutoEngineHint();
         ensureEvalEngineState(true);
       });
     }
@@ -5056,6 +5088,7 @@ function createToolsGui() {
   const modal = document.createElement('div');
   modal.id = 'cse-mc-gui';
   modal.className = 'cse-mc-gui';
+  modal.dataset.cseTheme = uiTheme;
   const SVG_ALL = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="0" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/></svg>`;
   const SVG_FAV = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2l2.9 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l7.1-1.01L12 2z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>`;
   const SVG_SETTINGS = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>`;
@@ -5178,6 +5211,7 @@ async function tickEvalBar() {
     evalRequestSeq++;
     lastEvalFen = null;
     lastEvalMoveSourceFen = null;
+    lastGameInsightsFen = null;
     currentBestMove = null;
     lastEvalTopMoves = [];
     lastEvalPvLines = [];
@@ -5220,8 +5254,21 @@ async function tickEvalBar() {
     lastEvalMate = null;
   }
 
+  const prevFen = lastEvalMoveSourceFen;
+  const insightPrevFen = lastGameInsightsFen;
+  lastGameInsightsFen = fen;
   lastEvalFen = fen;
   const requestSeq = ++evalRequestSeq;
+  const positionPly = getReliablePlyCount();
+
+  if (insightPrevFen && insightPrevFen !== fen) {
+    // Show an immediate marker while the engine evaluates the new position.
+    window.CSEGameInsights?.handlePositionChange?.({
+      fenBefore: insightPrevFen,
+      fenAfter: fen,
+      ply: positionPly,
+    });
+  }
 
   if (evalBarPanel?.isConnected) {
     evalBarPanel.title = '';
@@ -5232,14 +5279,13 @@ async function tickEvalBar() {
     }
   }
 
-  const prevFen = lastEvalMoveSourceFen;
   const result = await fetchEval(fen);
   if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
 
   updateEvalBarDisplay(result);
   window.CSEGameInsights?.handleEval?.({
     fen,
-    ply: getReliablePlyCount(),
+    ply: positionPly,
     cp: result && Number.isFinite(result.cp) ? result.cp : null,
     mate: result && Number.isFinite(result.mate) ? result.mate : null,
     bestMove: result?.bestMove || null,
@@ -5252,7 +5298,7 @@ async function tickEvalBar() {
       san: null,
       fenBefore: prevFen,
       fenAfter: fen,
-      ply: getReliablePlyCount(),
+      ply: positionPly,
     });
   }
   if (!result) {
@@ -5309,6 +5355,7 @@ const observer = new MutationObserver(() => {
     window.CSEStatsCheater?.scanAndInject?.();
     window.CSEEvalTools?.scanAndInjectEval?.();
     syncBestMoveOverlay();
+    window.CSEGameInsights?.flushPendingBadges?.();
     if (isGuiHudEnabled && (!guiHudPanel || !guiHudPanel.isConnected)) syncGuiHudPanel();
   } catch (err) {
     console.error('[CSE] observer tick failed', err);
@@ -5316,6 +5363,7 @@ const observer = new MutationObserver(() => {
 });
 observer.observe(document.body, { childList: true, subtree: true });
 applySavedGuiAndModuleState();
+applyUiTheme();
 installModuleHotkeys();
 window.CSEGameInsights?.init?.();
 window.CSEGameInsights?.setEnabled?.(isGameInsightsEnabled);
@@ -5338,6 +5386,7 @@ new MutationObserver(() => {
     playerSideCache = { side: null, ts: 0 };
     lastLoggedPlayerSide = null;
     lastEvalFen = null;
+    lastGameInsightsFen = null;
     currentBestMove = null;
     lastEvalTopMoves = [];
     lastEvalPvLines = [];
