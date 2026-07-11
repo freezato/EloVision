@@ -50,6 +50,10 @@ let generalLanguage = 'en'; // 'en' | 'it'
 let generalNumbersFormat = 'default'; // 'default' | 'eu'
 let generalMinimizeToTray = true;
 let uiTheme = 'aurora'; // 'aurora' | 'blockforge' | 'voidos'
+let uiAccent = 'emerald'; // 'emerald' | 'cyan' | 'violet' | 'rose' | 'gold'
+let uiDensity = 'comfortable'; // 'compact' | 'comfortable' | 'spacious'
+let uiMotionEnabled = true;
+let uiScale = 100;
 let evalBarDisplayMode = 'bar'; // 'bar' | 'percent'
 let stockfishFailureStreak = 0;
 let stockfishFailureSinceAt = 0;
@@ -105,7 +109,8 @@ const MAIA_ELO_STEP = 100;
 const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
 const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
 const MAIA_LOCAL_BOOT_TIMEOUT_MS = 9000;
-const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 2400;
+const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 900;
+const MAIA_LOCAL_MOVE_TIME_MS = 70;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -157,6 +162,10 @@ function cseSaveState() {
       generalNumbersFormat,
       generalMinimizeToTray,
       uiTheme,
+      uiAccent,
+      uiDensity,
+      uiMotionEnabled,
+      uiScale,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -1660,7 +1669,7 @@ function computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, profile = '
     reasons.push('low-time');
   }
 
-  minSec = Math.max(0.15, minSec);
+  minSec = Math.max(0, minSec);
   maxSec = Math.max(minSec, maxSec);
   return { minSec, maxSec, reasons, ownClockSec };
 }
@@ -2947,7 +2956,7 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
 
     try {
       worker.postMessage(`position fen ${fen}`);
-      worker.postMessage('go nodes 1');
+      worker.postMessage(`go movetime ${MAIA_LOCAL_MOVE_TIME_MS}`);
     } catch (err) {
       clearLocalMaiaSearch(null);
     }
@@ -3040,9 +3049,14 @@ function getEvalQueryDepth(fen = lastEvalFen) {
   }
 
   if (isAutomoveEnabled && !isPuzzleContext()) {
-    // Keep eval snappy in AutoMove contexts (live and vs bots).
-    const fastDepthCap = automoveMode === 'legit' ? 7 : 9;
-    return Math.max(5, Math.min(fastDepthCap, suggestMoveDepth));
+    // Maia uses a fixed short move-time; Stockfish remains depth-capped.
+    const fastDepthCap = automoveMode === 'legit' ? 5 : 8;
+    return Math.max(4, Math.min(fastDepthCap, suggestMoveDepth));
+  }
+
+  // Game Insights only needs a stable shallow score for live classification.
+  if (isGameInsightsEnabled && !isEvalBarEnabled && !arrowsEnabled) {
+    return Math.max(4, Math.min(7, suggestMoveDepth));
   }
 
   return Math.max(1, Math.min(15, suggestMoveDepth));
@@ -3776,8 +3790,8 @@ function applySavedGuiAndModuleState() {
     }
     if (Number.isFinite(saved.settings.maiaElo)) maiaElo = normalizeMaiaElo(saved.settings.maiaElo);
     if (saved.settings.automoveMode === 'legit' || saved.settings.automoveMode === 'blatant') automoveMode = saved.settings.automoveMode;
-    if (Number.isFinite(saved.settings.automoveDelayMin)) automoveDelayMin = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMin)));
-    if (Number.isFinite(saved.settings.automoveDelayMax)) automoveDelayMax = Math.max(1, Math.min(15, Math.round(saved.settings.automoveDelayMax)));
+    if (Number.isFinite(saved.settings.automoveDelayMin)) automoveDelayMin = Math.max(0, Math.min(15, Math.round(saved.settings.automoveDelayMin)));
+    if (Number.isFinite(saved.settings.automoveDelayMax)) automoveDelayMax = Math.max(0, Math.min(15, Math.round(saved.settings.automoveDelayMax)));
     if (automoveDelayMax < automoveDelayMin) automoveDelayMax = automoveDelayMin;
     automoveFastWhenLowTime = !!saved.settings.automoveFastWhenLowTime;
     automoveFastInOpening = !!saved.settings.automoveFastInOpening;
@@ -3802,14 +3816,31 @@ function applySavedGuiAndModuleState() {
     }
     generalMinimizeToTray = saved.settings.generalMinimizeToTray !== false;
     if (['aurora', 'blockforge', 'voidos'].includes(saved.settings.uiTheme)) uiTheme = saved.settings.uiTheme;
+    if (['emerald', 'cyan', 'violet', 'rose', 'gold'].includes(saved.settings.uiAccent)) uiAccent = saved.settings.uiAccent;
+    if (['compact', 'comfortable', 'spacious'].includes(saved.settings.uiDensity)) uiDensity = saved.settings.uiDensity;
+    uiMotionEnabled = saved.settings.uiMotionEnabled !== false;
+    if (Number.isFinite(saved.settings.uiScale)) uiScale = Math.max(80, Math.min(120, Math.round(saved.settings.uiScale)));
   }
 }
 
 function applyUiTheme() {
   const theme = ['aurora', 'blockforge', 'voidos'].includes(uiTheme) ? uiTheme : 'aurora';
-  document.documentElement.dataset.cseTheme = theme;
-  if (document.body) document.body.dataset.cseTheme = theme;
-  if (toolsModal?.isConnected) toolsModal.dataset.cseTheme = theme;
+  const root = document.documentElement;
+  root.dataset.cseTheme = theme;
+  root.dataset.cseAccent = uiAccent;
+  root.dataset.cseDensity = uiDensity;
+  root.dataset.cseMotion = uiMotionEnabled ? 'on' : 'off';
+  root.style.setProperty('--cse-ui-scale', String(uiScale / 100));
+  if (document.body) {
+    document.body.dataset.cseTheme = theme;
+    document.body.dataset.cseAccent = uiAccent;
+    document.body.dataset.cseDensity = uiDensity;
+    document.body.dataset.cseMotion = uiMotionEnabled ? 'on' : 'off';
+  }
+  if (toolsModal?.isConnected) {
+    toolsModal.dataset.cseTheme = theme;
+    toolsModal.style.zoom = String(uiScale / 100);
+  }
 }
 
 function getSavedEvalBarPosition() {
@@ -4225,17 +4256,17 @@ function cseRenderGui() {
             <div class="cse-gs-header"><div class="cse-gs-title">Appearance</div><div class="cse-gs-subtitle">Choose the client shell and tune its visual language.</div></div>
             <div class="cse-ap-section-title">Interface theme</div>
             <div class="cse-theme-grid">
-              <button class="cse-theme-card cse-theme-aurora ${uiTheme === 'aurora' ? 'is-selected' : ''}" data-ui-theme="aurora" type="button"><span class="cse-theme-mark">A</span><strong>Aurora</strong><small>Current Maia Chess</small><i>Modern · Emerald · Rounded</i></button>
-              <button class="cse-theme-card cse-theme-blockforge ${uiTheme === 'blockforge' ? 'is-selected' : ''}" data-ui-theme="blockforge" type="button"><span class="cse-theme-mark">▣</span><strong>BlockForge</strong><small>Voxel utility client</small><i>Pixel · Stone · Chunky</i></button>
-              <button class="cse-theme-card cse-theme-voidos ${uiTheme === 'voidos' ? 'is-selected' : ''}" data-ui-theme="voidos" type="button"><span class="cse-theme-mark">◇</span><strong>VoidOS</strong><small>Technical overlay</small><i>Neon · Angular · HUD</i></button>
+              <button class="cse-theme-card cse-theme-aurora ${uiTheme === 'aurora' ? 'is-selected' : ''}" data-ui-theme="aurora" type="button"><span class="cse-theme-mark">♞</span><strong>Maia Classic</strong><small>Original Maia Chess</small><span class="cse-theme-preview cse-preview-classic"><b></b><b></b><b></b></span><i>Modern · Emerald · Rounded</i></button>
+              <button class="cse-theme-card cse-theme-blockforge ${uiTheme === 'blockforge' ? 'is-selected' : ''}" data-ui-theme="blockforge" type="button"><span class="cse-theme-mark cse-pixel-grass" aria-hidden="true"></span><strong>Blockcraft Classic</strong><small>Minecraft-style utility client</small><span class="cse-theme-preview cse-preview-blockcraft"><b></b><b></b><b></b><b></b><b></b></span><i>Pixel · Grass · Stone</i></button>
+              <button class="cse-theme-card cse-theme-voidos ${uiTheme === 'voidos' ? 'is-selected' : ''}" data-ui-theme="voidos" type="button"><span class="cse-theme-mark cse-neon-chip" aria-hidden="true"></span><strong>Voidtech Neon</strong><small>Futuristic hack client</small><span class="cse-theme-preview cse-preview-voidtech"><b></b><b></b><b></b><b></b></span><i>Neon · Cyan · Angular HUD</i></button>
             </div>
             <div class="cse-ap-layout">
               <div class="cse-ap-controls">
                 <div class="cse-ap-section-title">UI controls</div>
-                <div class="cse-ap-row"><span><b>Accent color</b><small>Theme-native highlight</small></span><div class="cse-ap-swatches"><i></i><i></i><i></i><i></i><i></i></div></div>
-                <div class="cse-ap-row"><span><b>Interface density</b><small>Comfortable layout</small></span><select class="cse-gs-select"><option>Comfortable</option><option>Compact</option><option>Spacious</option></select></div>
-                <div class="cse-ap-row"><span><b>Motion</b><small>Transitions and feedback</small></span><label class="cse-gs-switch"><input type="checkbox" checked><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>
-                <div class="cse-ap-row"><span><b>Window scale</b><small>100%</small></span><input class="cse-mc-slider" type="range" min="80" max="120" value="100"></div>
+                <div class="cse-ap-row"><span><b>Accent color</b><small>Choose the interface highlight</small></span><div class="cse-ap-swatches">${['emerald','cyan','violet','rose','gold'].map(color => `<button type="button" data-ui-accent="${color}" class="${uiAccent === color ? 'is-selected' : ''}" aria-label="${color}"></button>`).join('')}</div></div>
+                <div class="cse-ap-row"><span><b>Interface density</b><small>Spacing and information density</small></span><select id="cse-ui-density" class="cse-gs-select"><option value="comfortable" ${uiDensity === 'comfortable' ? 'selected' : ''}>Comfortable</option><option value="compact" ${uiDensity === 'compact' ? 'selected' : ''}>Compact</option><option value="spacious" ${uiDensity === 'spacious' ? 'selected' : ''}>Spacious</option></select></div>
+                <div class="cse-ap-row"><span><b>Motion</b><small>Transitions and visual feedback</small></span><label class="cse-gs-switch"><input id="cse-ui-motion" type="checkbox" ${uiMotionEnabled ? 'checked' : ''}><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>
+                <div class="cse-ap-row"><span><b>Window scale</b><small id="cse-ui-scale-value">${uiScale}%</small></span><input id="cse-ui-scale" class="cse-mc-slider" type="range" min="80" max="120" value="${uiScale}"></div>
               </div>
               <div class="cse-ap-preview"><div class="cse-ap-preview-label">Live preview</div><div class="cse-ap-mini-window"><div></div><span>MAIA CHESS</span><p>Module active</p><button>CONFIGURE</button></div></div>
             </div>
@@ -4293,6 +4324,31 @@ function cseRenderGui() {
         cseSaveState();
         cseRenderGui();
       });
+    });
+    grid.querySelectorAll('[data-ui-accent]').forEach(button => {
+      button.addEventListener('click', () => {
+        uiAccent = ['emerald','cyan','violet','rose','gold'].includes(button.dataset.uiAccent) ? button.dataset.uiAccent : 'emerald';
+        applyUiTheme();
+        cseSaveState();
+        cseRenderGui();
+      });
+    });
+    const densitySelect = grid.querySelector('#cse-ui-density');
+    if (densitySelect) densitySelect.addEventListener('change', () => {
+      uiDensity = ['compact','comfortable','spacious'].includes(densitySelect.value) ? densitySelect.value : 'comfortable';
+      applyUiTheme(); cseSaveState(); cseRenderGui();
+    });
+    const motionToggle = grid.querySelector('#cse-ui-motion');
+    if (motionToggle) motionToggle.addEventListener('change', () => {
+      uiMotionEnabled = !!motionToggle.checked;
+      applyUiTheme(); cseSaveState();
+    });
+    const scaleSlider = grid.querySelector('#cse-ui-scale');
+    if (scaleSlider) scaleSlider.addEventListener('input', () => {
+      uiScale = Math.max(80, Math.min(120, parseInt(scaleSlider.value, 10) || 100));
+      const label = grid.querySelector('#cse-ui-scale-value');
+      if (label) label.textContent = uiScale + '%';
+      applyUiTheme(); cseSaveState();
     });
 
     const languageSelect = grid.querySelector('#cse-general-language');
@@ -4646,11 +4702,11 @@ function cseRenderSettingsPanel(modId) {
         </div>
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay min</span><span class="cse-mc-sval" id="cse-sp-dmin-val">${automoveDelayMin}s</span></div>
-          <input type="range" class="cse-mc-slider" id="cse-sp-dmin" min="1" max="15" step="1" value="${automoveDelayMin}">
+          <input type="range" class="cse-mc-slider" id="cse-sp-dmin" min="0" max="15" step="1" value="${automoveDelayMin}">
         </div>
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Delay max</span><span class="cse-mc-sval" id="cse-sp-dmax-val">${automoveDelayMax}s</span></div>
-          <input type="range" class="cse-mc-slider" id="cse-sp-dmax" min="1" max="15" step="1" value="${automoveDelayMax}">
+          <input type="range" class="cse-mc-slider" id="cse-sp-dmax" min="0" max="15" step="1" value="${automoveDelayMax}">
         </div>
         <div class="cse-mc-srow cse-mc-check-row">
           <label class="cse-mc-check">
@@ -5089,6 +5145,7 @@ function createToolsGui() {
   modal.id = 'cse-mc-gui';
   modal.className = 'cse-mc-gui';
   modal.dataset.cseTheme = uiTheme;
+  modal.style.zoom = String(uiScale / 100);
   const SVG_ALL = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="0" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/></svg>`;
   const SVG_FAV = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2l2.9 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l7.1-1.01L12 2z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>`;
   const SVG_SETTINGS = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>`;
@@ -5355,7 +5412,6 @@ const observer = new MutationObserver(() => {
     window.CSEStatsCheater?.scanAndInject?.();
     window.CSEEvalTools?.scanAndInjectEval?.();
     syncBestMoveOverlay();
-    window.CSEGameInsights?.flushPendingBadges?.();
     if (isGuiHudEnabled && (!guiHudPanel || !guiHudPanel.isConnected)) syncGuiHudPanel();
   } catch (err) {
     console.error('[CSE] observer tick failed', err);
