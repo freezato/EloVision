@@ -53,7 +53,13 @@ let uiTheme = 'aurora'; // 'aurora' | 'blockforge' | 'voidos'
 let uiAccent = 'emerald'; // 'emerald' | 'cyan' | 'violet' | 'rose' | 'gold'
 let uiDensity = 'comfortable'; // 'compact' | 'comfortable' | 'spacious'
 let uiMotionEnabled = true;
-let uiScale = 100;
+let uiNotifications = {
+  engineReady: true,
+  gameFinished: true,
+  opponentMove: true,
+  analysisWarning: false,
+  moduleUpdate: false,
+};
 let evalBarDisplayMode = 'bar'; // 'bar' | 'percent'
 let stockfishFailureStreak = 0;
 let stockfishFailureSinceAt = 0;
@@ -165,7 +171,7 @@ function cseSaveState() {
       uiAccent,
       uiDensity,
       uiMotionEnabled,
-      uiScale,
+      notifications: { ...uiNotifications },
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -3819,7 +3825,11 @@ function applySavedGuiAndModuleState() {
     if (['emerald', 'cyan', 'violet', 'rose', 'gold'].includes(saved.settings.uiAccent)) uiAccent = saved.settings.uiAccent;
     if (['compact', 'comfortable', 'spacious'].includes(saved.settings.uiDensity)) uiDensity = saved.settings.uiDensity;
     uiMotionEnabled = saved.settings.uiMotionEnabled !== false;
-    if (Number.isFinite(saved.settings.uiScale)) uiScale = Math.max(80, Math.min(120, Math.round(saved.settings.uiScale)));
+    if (saved.settings.notifications && typeof saved.settings.notifications === 'object') {
+      for (const key of Object.keys(uiNotifications)) {
+        if (typeof saved.settings.notifications[key] === 'boolean') uiNotifications[key] = saved.settings.notifications[key];
+      }
+    }
   }
 }
 
@@ -3830,17 +3840,13 @@ function applyUiTheme() {
   root.dataset.cseAccent = uiAccent;
   root.dataset.cseDensity = uiDensity;
   root.dataset.cseMotion = uiMotionEnabled ? 'on' : 'off';
-  root.style.setProperty('--cse-ui-scale', String(uiScale / 100));
   if (document.body) {
     document.body.dataset.cseTheme = theme;
     document.body.dataset.cseAccent = uiAccent;
     document.body.dataset.cseDensity = uiDensity;
     document.body.dataset.cseMotion = uiMotionEnabled ? 'on' : 'off';
   }
-  if (toolsModal?.isConnected) {
-    toolsModal.dataset.cseTheme = theme;
-    toolsModal.style.zoom = String(uiScale / 100);
-  }
+  if (toolsModal?.isConnected) toolsModal.dataset.cseTheme = theme;
 }
 
 function cseSyncAnimatedRanges(root = document) {
@@ -3856,6 +3862,39 @@ function cseSyncAnimatedRanges(root = document) {
 document.addEventListener('input', event => {
   if (event.target?.matches?.('.cse-mc-slider[type="range"]')) cseSyncAnimatedRanges(event.target.parentElement || document);
 }, { passive: true });
+
+const cseNotificationTimes = new Map();
+function cseNotify(key, title, message = '', options = {}) {
+  if (!uiNotifications[key]) return;
+  const id = options.id || key;
+  const cooldown = Number.isFinite(options.cooldown) ? options.cooldown : 1400;
+  const previous = cseNotificationTimes.get(id) || 0;
+  if (now() - previous < cooldown) return;
+  cseNotificationTimes.set(id, now());
+
+  let tray = document.getElementById('cse-toast-tray');
+  if (!tray) {
+    tray = document.createElement('aside');
+    tray.id = 'cse-toast-tray';
+    tray.className = 'cse-toast-tray';
+    tray.setAttribute('aria-live', 'polite');
+    document.body.appendChild(tray);
+  }
+  const toast = document.createElement('button');
+  toast.type = 'button';
+  toast.className = `cse-toast cse-toast-${key}`;
+  toast.innerHTML = `<span class="cse-toast-pulse"></span><span><strong>${escapeHtmlAttr(title)}</strong><small>${escapeHtmlAttr(message)}</small></span><i>×</i>`;
+  const dismiss = () => {
+    if (toast.classList.contains('is-leaving')) return;
+    toast.classList.add('is-leaving');
+    setTimeout(() => toast.remove(), 220);
+  };
+  toast.addEventListener('click', dismiss);
+  tray.appendChild(toast);
+  while (tray.children.length > 4) tray.firstElementChild?.remove();
+  setTimeout(dismiss, options.duration || 3600);
+}
+window.CSENotify = cseNotify;
 
 function getSavedEvalBarPosition() {
   const saved = cseReadState();
@@ -3883,8 +3922,10 @@ function resetStockfishFailureTracking() {
 }
 
 function registerEvalSuccess() {
+  const wasOffline = !stockfishLastSuccessAt || stockfishFailureStreak > 0;
   stockfishLastSuccessAt = now();
   resetStockfishFailureTracking();
+  if (wasOffline) cseNotify('engineReady', 'Engine ready', getActiveEvalEngineLabel(), { id: 'engine-ready', cooldown: 30000 });
 }
 
 function registerEvalFailure() {
@@ -4280,14 +4321,26 @@ function cseRenderGui() {
                 <div class="cse-ap-row"><span><b>Accent color</b><small>Choose the interface highlight</small></span><div class="cse-ap-swatches">${['emerald','cyan','violet','rose','gold'].map(color => `<button type="button" data-ui-accent="${color}" class="${uiAccent === color ? 'is-selected' : ''}" aria-label="${color}"></button>`).join('')}</div></div>
                 <div class="cse-ap-row"><span><b>Interface density</b><small>Spacing and information density</small></span><select id="cse-ui-density" class="cse-gs-select"><option value="comfortable" ${uiDensity === 'comfortable' ? 'selected' : ''}>Comfortable</option><option value="compact" ${uiDensity === 'compact' ? 'selected' : ''}>Compact</option><option value="spacious" ${uiDensity === 'spacious' ? 'selected' : ''}>Spacious</option></select></div>
                 <div class="cse-ap-row"><span><b>Motion</b><small>Transitions and visual feedback</small></span><label class="cse-gs-switch"><input id="cse-ui-motion" type="checkbox" ${uiMotionEnabled ? 'checked' : ''}><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>
-                <div class="cse-ap-row"><span><b>Window scale</b><small id="cse-ui-scale-value">${uiScale}%</small></span><input id="cse-ui-scale" class="cse-mc-slider" type="range" min="80" max="120" value="${uiScale}"></div>
               </div>
-              <div class="cse-ap-preview"><div class="cse-ap-preview-label">Live preview</div><div class="cse-ap-mini-window"><div></div><span>MAIA CHESS</span><p>Module active</p><button>CONFIGURE</button></div></div>
+              <div class="cse-ap-preview">
+                <div class="cse-ap-preview-label">Live preview</div>
+                <section class="cse-ap-mini-window" aria-label="Theme preview">
+                  <header><span class="cse-ap-mini-logo">♞</span><b>${uiTheme === 'blockforge' ? 'BLOCKCRAFT' : uiTheme === 'voidos' ? 'VOIDTECH' : 'MAIA CHESS'}</b><i></i><i></i><i></i></header>
+                  <main><aside><span></span><span></span><span></span><span></span></aside><article><strong>Appearance</strong><small>${uiDensity} · ${uiAccent}</small><em></em><em></em><button type="button">MODULE ACTIVE</button></article></main>
+                </section>
+              </div>
             </div>
           </div>
         ` : activeSettingsSection === 'notifications' ? `
-          <div class="cse-gs-page"><div class="cse-gs-header"><div class="cse-gs-title">Notifications</div><div class="cse-gs-subtitle">Choose which client events deserve your attention.</div></div>
-            <div class="cse-gs-block"><div class="cse-gs-block-kicker">EVENT MATRIX</div>${['Engine ready','Game finished','Opponent move','Analysis warning','Module update'].map((label, i) => `<div class="cse-gs-row"><div class="cse-gs-row-left"><span class="cse-gs-row-icon">${i + 1}</span><span><span class="cse-gs-row-title">${label}</span><span class="cse-gs-row-sub">In-client notification</span></span></div><label class="cse-gs-switch"><input type="checkbox" ${i < 3 ? 'checked' : ''}><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>`).join('')}</div></div>
+          <div class="cse-gs-page"><div class="cse-gs-header"><div class="cse-gs-title">Notifications</div><div class="cse-gs-subtitle">Persistent in-client alerts for important events.</div></div>
+            <div class="cse-gs-block"><div class="cse-gs-block-kicker">EVENT MATRIX</div>${[
+              ['engineReady','Engine ready','The selected analysis engine is available.'],
+              ['gameFinished','Game finished','Show the final result and recap alert.'],
+              ['opponentMove','Opponent move','Notify when the opponent completes a move.'],
+              ['analysisWarning','Analysis warning','Highlight mistakes and blunders from Game Insights.'],
+              ['moduleUpdate','Module update','Confirm when a module is enabled or disabled.']
+            ].map(([key,label,copy], i) => `<div class="cse-gs-row"><div class="cse-gs-row-left"><span class="cse-gs-row-icon">${i + 1}</span><span><span class="cse-gs-row-title">${label}</span><span class="cse-gs-row-sub">${copy}</span></span></div><label class="cse-gs-switch"><input type="checkbox" data-notification-key="${key}" ${uiNotifications[key] ? 'checked' : ''}><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>`).join('')}</div>
+            <div class="cse-gs-footer">Notifications are saved automatically and appear inside Chess.com.</div></div>
         ` : activeSettingsSection === 'about' ? `
           <div class="cse-gs-page cse-about-page"><div class="cse-gs-header"><div class="cse-gs-title">About</div><div class="cse-gs-subtitle">Maia Chess utility client.</div></div><div class="cse-about-hero"><div class="cse-about-mark">♞</div><div><b>Maia Chess</b><span>Version 1.0.0 · ${uiTheme}</span><p>Analysis, automation and game insights in one configurable client.</p></div></div><div class="cse-gs-block"><div class="cse-gs-block-kicker">SYSTEM</div><div class="cse-about-meta"><span>Engine provider</span><b>${providerLabel}</b><span>Interface shell</span><b>${uiTheme}</b><span>State storage</span><b>Local</b></div></div></div>
         ` : `<div class="cse-empty-settings">No settings available for this section.</div>`}
@@ -4357,12 +4410,15 @@ function cseRenderGui() {
       uiMotionEnabled = !!motionToggle.checked;
       applyUiTheme(); cseSaveState();
     });
-    const scaleSlider = grid.querySelector('#cse-ui-scale');
-    if (scaleSlider) scaleSlider.addEventListener('input', () => {
-      uiScale = Math.max(80, Math.min(120, parseInt(scaleSlider.value, 10) || 100));
-      const label = grid.querySelector('#cse-ui-scale-value');
-      if (label) label.textContent = uiScale + '%';
-      applyUiTheme(); cseSaveState();
+    grid.querySelectorAll('[data-notification-key]').forEach(toggle => {
+      toggle.addEventListener('change', () => {
+        const key = toggle.dataset.notificationKey;
+        if (Object.prototype.hasOwnProperty.call(uiNotifications, key)) {
+          uiNotifications[key] = !!toggle.checked;
+          cseSaveState();
+          if (toggle.checked) cseNotify(key, 'Notification enabled', key.replace(/([A-Z])/g, ' $1').toLowerCase(), { id: 'setting-' + key, duration: 2200 });
+        }
+      });
     });
 
     const languageSelect = grid.querySelector('#cse-general-language');
@@ -4531,6 +4587,7 @@ function cseRenderGui() {
       updateAutomoveButtonState();
       syncGuiHudPanel();
       cseSaveState();
+      cseNotify('moduleUpdate', mod.label + (mod.active ? ' disabled' : ' enabled'), 'Module state updated', { id: 'module-' + mod.id });
       cseRenderGui();
       };
       if (!wasActive) {
@@ -4805,6 +4862,7 @@ function cseRenderSettingsPanel(modId) {
       `}
     </div>
   `;
+  cseSyncAnimatedRanges(ov);
 
   const closeSettingsPanel = () => {
     ov.classList.remove('is-open');
@@ -5162,7 +5220,6 @@ function createToolsGui() {
   modal.id = 'cse-mc-gui';
   modal.className = 'cse-mc-gui';
   modal.dataset.cseTheme = uiTheme;
-  modal.style.zoom = String(uiScale / 100);
   const SVG_ALL = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="0" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="0" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/><rect x="7.5" y="7.5" width="5.5" height="5.5" rx="1.2" fill="currentColor"/></svg>`;
   const SVG_FAV = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2l2.9 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l7.1-1.01L12 2z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>`;
   const SVG_SETTINGS = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>`;
@@ -5343,6 +5400,12 @@ async function tickEvalBar() {
       fenAfter: fen,
       ply: positionPly,
     });
+    const notificationBoard = getBoardElement();
+    const notificationSide = getPlayerSide(notificationBoard);
+    const notificationTurn = normalizeTurn(fen.split(' ')[1]);
+    if (notificationSide && notificationTurn === notificationSide) {
+      cseNotify('opponentMove', 'Opponent moved', 'Your turn', { id: 'opponent-move-' + positionPly, cooldown: 250 });
+    }
   }
 
   if (evalBarPanel?.isConnected) {
@@ -5358,6 +5421,7 @@ async function tickEvalBar() {
   if (requestSeq !== evalRequestSeq || lastEvalFen !== fen) return;
 
   updateEvalBarDisplay(result);
+  const gameOverVisible = isGameOverVisible();
   window.CSEGameInsights?.handleEval?.({
     fen,
     ply: positionPly,
@@ -5365,8 +5429,11 @@ async function tickEvalBar() {
     mate: result && Number.isFinite(result.mate) ? result.mate : null,
     bestMove: result?.bestMove || null,
     topMoves: Array.isArray(result?.topMoves) ? result.topMoves.slice(0, 4) : [],
-    gameOver: isGameOverVisible(),
+    gameOver: gameOverVisible,
   });
+  if (gameOverVisible) {
+    cseNotify('gameFinished', 'Game finished', 'Open Game Insights for the recap', { id: 'game-finished-' + getToxicChatGameToken(), cooldown: 60000, duration: 5200 });
+  }
   if (prevFen && prevFen !== fen) {
     window.CSEGameInsights?.handleMove?.({
       uci: null,
