@@ -3843,6 +3843,20 @@ function applyUiTheme() {
   }
 }
 
+function cseSyncAnimatedRanges(root = document) {
+  root.querySelectorAll?.('.cse-mc-slider[type="range"]').forEach(slider => {
+    const min = Number(slider.min || 0);
+    const max = Number(slider.max || 100);
+    const value = Number(slider.value || min);
+    const progress = max > min ? ((value - min) / (max - min)) * 100 : 0;
+    slider.style.setProperty('--cse-range-progress', Math.max(0, Math.min(100, progress)) + '%');
+  });
+}
+
+document.addEventListener('input', event => {
+  if (event.target?.matches?.('.cse-mc-slider[type="range"]')) cseSyncAnimatedRanges(event.target.parentElement || document);
+}, { passive: true });
+
 function getSavedEvalBarPosition() {
   const saved = cseReadState();
   const p = saved?.evalBarPosition;
@@ -4375,6 +4389,7 @@ function cseRenderGui() {
       });
     }
 
+    cseSyncAnimatedRanges(grid);
     syncGuiHudPanel();
     return;
   }
@@ -4580,6 +4595,7 @@ function setAutomoveEnabled(enabled) {
     if (!isPuzzleRushEnabled) stopAutomoveUiTicker();
   } else {
     startAutomoveUiTicker();
+    if (automoveMode === 'legit') ensureLocalMaiaEngine().catch(() => {});
   }
   ensureEvalEngineState(true);
   if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
@@ -4884,6 +4900,7 @@ function cseRenderSettingsPanel(modId) {
         lastEvalMate = null;
         cseSaveState();
         updateAutomoveModeUI();
+        if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(() => {});
         ensureEvalEngineState(true);
       });
     });
@@ -5231,6 +5248,7 @@ function createToolsGui() {
 
   toolsModal = modal;
   cseRenderGui();
+  cseSyncAnimatedRanges(modal);
 
   if (guiRefreshInterval) clearInterval(guiRefreshInterval);
   guiRefreshInterval = setInterval(() => {
@@ -5429,6 +5447,7 @@ if (isAutomoveEnabled || isPuzzleRushEnabled) startAutomoveUiTicker();
 if (isAutoPlayEnabled) startAutoPlayTicker();
 if (isToxicChatEnabled) startToxicChatTicker();
 syncGuiHudPanel();
+if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(() => {});
 ensureEvalEngineState(true);
 cseSaveState();
 window.CSEStatsCheater?.scanAndInject?.();
