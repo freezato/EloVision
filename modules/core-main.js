@@ -115,7 +115,7 @@ const MAIA_ELO_MAX = 1900;
 const MAIA_ELO_STEP = 100;
 const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
 const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
-const MAIA_LOCAL_BOOT_TIMEOUT_MS = 9000;
+const MAIA_LOCAL_BOOT_TIMEOUT_MS = 30000;
 const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 1800;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
@@ -2846,16 +2846,11 @@ function ensureLocalMaiaEngine() {
   localMaiaInitPromise = (async () => {
     const scriptUrl = chrome.runtime.getURL(MAIA_LOCAL_SCRIPT_PATH);
     const weightsUrl = chrome.runtime.getURL(getMaiaWeightsPath(elo));
-    const res = await fetch(scriptUrl);
-    if (!res.ok) throw new Error(`local-maia-script-${res.status}`);
-    const source = await res.text();
-    if (!source || source.length < 200) throw new Error('local-maia-script-empty');
-
-    const blob = new Blob([source], { type: 'text/javascript' });
-    const blobUrl = URL.createObjectURL(blob);
-    const worker = new Worker(blobUrl);
+    // Maia is an ES module worker because the bundled LC0 runtime uses
+    // import.meta, a WASM module and module-based pthread workers.
+    const worker = new Worker(scriptUrl, { type: 'module', name: 'cse-maia-local' });
     localMaiaWorker = worker;
-    localMaiaWorkerBlobUrl = blobUrl;
+    localMaiaWorkerBlobUrl = null;
 
     await new Promise((resolve, reject) => {
       let done = false;
