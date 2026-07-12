@@ -116,8 +116,7 @@ const MAIA_ELO_STEP = 100;
 const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
 const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
 const MAIA_LOCAL_BOOT_TIMEOUT_MS = 9000;
-const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 900;
-const MAIA_LOCAL_MOVE_TIME_MS = 70;
+const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 600;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -2964,7 +2963,8 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
 
     try {
       worker.postMessage(`position fen ${fen}`);
-      worker.postMessage(`go movetime ${MAIA_LOCAL_MOVE_TIME_MS}`);
+      // Restore the original fast local Maia search behavior.
+      worker.postMessage('go nodes 1');
     } catch (err) {
       clearLocalMaiaSearch(null);
     }
@@ -3197,9 +3197,11 @@ async function fetchEval(fen) {
     addFrom(payload?.continuation);
     return normalizeTopMoves(collected);
   };
-  const allowApiFallback = stockfishProvider === 'api' || stockfishProvider === 'local';
+  const allowApiFallback = activeEngineId !== 'maia' && (stockfishProvider === 'api' || stockfishProvider === 'local');
 
   if (activeEngineId === 'maia') {
+    // Maia is local-only: do not replace a slow/failed Maia response with
+    // Stockfish or the remote API, which made latency and behavior inconsistent.
     releaseLocalStockfishEngine();
     try {
       const maiaResult = await runLocalMaiaEval(fen, queryDepth, signal);
@@ -3208,13 +3210,16 @@ async function fetchEval(fen) {
         registerEvalSuccess();
         return maiaResult;
       }
+      registerEvalFailure();
+      return null;
     } catch (e) {
       if (e?.name === 'AbortError') return null;
+      registerEvalFailure();
       releaseLocalMaiaEngine();
+      return null;
     }
-  } else {
-    releaseLocalMaiaEngine();
   }
+  releaseLocalMaiaEngine();
 
   if (isLocalStockfishProvider()) {
     try {
