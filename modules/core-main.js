@@ -134,6 +134,7 @@ function cseSaveState() {
   const state = {
     favorites: { ...(cseGuiState?.favorites || {}) },
     activeTab: cseGuiState?.activeTab || 'ALL',
+    verdantSections: { ...(cseGuiState?.verdantSections || {}) },
     modules: {
       AutoMove: !!isAutomoveEnabled,
       PuzzleRush: !!isPuzzleRushEnabled,
@@ -3940,6 +3941,7 @@ const cseGuiState = {
   favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, ToxicChat: false, GameInsights: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
   settingsSection: 'general',
+  verdantSections: { automation: true, analysis: true, interface: true, security: false, themes: true },
 };
 
 function applySavedGuiAndModuleState() {
@@ -3962,6 +3964,13 @@ function applySavedGuiAndModuleState() {
 
   if (saved.activeTab === 'ALL' || saved.activeTab === 'FAVORITE' || saved.activeTab === 'SETTINGS') {
     cseGuiState.activeTab = saved.activeTab;
+  }
+  if (saved.verdantSections && typeof saved.verdantSections === 'object') {
+    for (const key of Object.keys(cseGuiState.verdantSections)) {
+      if (typeof saved.verdantSections[key] === 'boolean') {
+        cseGuiState.verdantSections[key] = saved.verdantSections[key];
+      }
+    }
   }
 
   if (saved.modules && typeof saved.modules === 'object') {
@@ -4285,9 +4294,175 @@ function syncGuiHudPanel() {
   list.innerHTML = safeEntries.map(e => `<div class="cse-gui-hud-item">${e.html}</div>`).join('');
 }
 
+function toggleCseGuiModule(mod) {
+  if (!mod) return;
+  const wasActive = !!mod.active;
+  if (mod.id === 'AutoMove') {
+    setAutomoveEnabled(!isAutomoveEnabled);
+    return;
+  }
+  if (mod.id === 'PuzzleRush') {
+    isPuzzleRushEnabled = !isPuzzleRushEnabled;
+    clearPuzzleRushDepthFallback();
+    if (!isPuzzleRushEnabled) {
+      clearAutomoveSchedule();
+      if (!isAutomoveEnabled) stopAutomoveUiTicker();
+    } else {
+      startAutomoveUiTicker();
+    }
+  } else if (mod.id === 'AutoPlay') {
+    isAutoPlayEnabled = !isAutoPlayEnabled;
+    if (!isAutoPlayEnabled) {
+      clearAutoPlaySchedule(true);
+      stopAutoPlayTicker();
+    } else {
+      startAutoPlayTicker();
+    }
+  } else if (mod.id === 'ToxicChat') {
+    isToxicChatEnabled = !isToxicChatEnabled;
+    if (!isToxicChatEnabled) {
+      stopToxicChatTicker();
+      clearToxicChatState();
+    } else {
+      startToxicChatTicker();
+    }
+  } else if (mod.id === 'GameInsights') {
+    isGameInsightsEnabled = !isGameInsightsEnabled;
+    window.CSEGameInsights?.setEnabled?.(isGameInsightsEnabled);
+    window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
+  } else if (mod.id === 'SuggestMove') {
+    setSuggestMoveEnabled(!arrowsEnabled);
+    return;
+  } else if (mod.id === 'EvaluationBar') {
+    isEvalBarEnabled = !isEvalBarEnabled;
+    if (isEvalBarEnabled) createEvaluationBarPanel();
+    else removeEvaluationBarPanel();
+  } else if (mod.id === 'GUI') {
+    isGuiHudEnabled = !isGuiHudEnabled;
+    syncGuiHudPanel();
+  } else {
+    return;
+  }
+
+  ensureEvalEngineState(true);
+  if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
+  updateAutomoveButtonState();
+  syncGuiHudPanel();
+  cseSaveState();
+  cseNotify('moduleUpdate', mod.label + (wasActive ? ' disabled' : ' enabled'), 'Module state updated', { id: 'module-' + mod.id });
+  cseRenderGui();
+}
+
+function cseRenderVerdantGui(modal, allMods) {
+  const grid = modal.querySelector('#cse-mc-grid');
+  const modulesById = Object.fromEntries(allMods.map(mod => [mod.id, mod]));
+  const renderModule = id => {
+    const mod = modulesById[id];
+    if (!mod) return '';
+    const isOpen = cseGuiState.openSettings === mod.id;
+    return `
+      <div class="cse-verdant-module ${isOpen ? 'is-settings-open' : ''}" data-module-id="${mod.id}" title="Right-click for ${mod.label} settings">
+        <span class="cse-verdant-module-name">${mod.label}</span>
+        <button type="button" class="cse-verdant-toggle ${mod.active ? 'is-on' : ''}" data-module-toggle="${mod.id}" aria-label="Toggle ${mod.label}" aria-pressed="${mod.active ? 'true' : 'false'}"><span></span></button>
+      </div>
+      ${isOpen ? `<div class="cse-verdant-inline-settings-host" data-settings-host="${mod.id}"></div>` : ''}
+    `;
+  };
+  const renderSection = (id, label, moduleIds, extra = '') => {
+    const expanded = cseGuiState.verdantSections[id] !== false;
+    return `
+      <section class="cse-verdant-section ${expanded ? 'is-expanded' : ''}" data-verdant-section="${id}">
+        <button type="button" class="cse-verdant-section-title" data-section-toggle="${id}" aria-expanded="${expanded ? 'true' : 'false'}"><span>${label}</span><i></i></button>
+        <div class="cse-verdant-section-body">${moduleIds.map(renderModule).join('')}${extra}</div>
+      </section>
+    `;
+  };
+  const themeOptions = [
+    ['aurora', 'Maia Classic'],
+    ['blockforge', 'BlockCraft Classic'],
+    ['voidos', 'Voidtech Neon'],
+    ['claude', 'Claude'],
+    ['verdant', 'Verdant'],
+  ].map(([id, label]) => `
+    <button type="button" class="cse-verdant-theme-option ${uiTheme === id ? 'is-selected' : ''}" data-verdant-theme="${id}"><span>${label}</span>${uiTheme === id ? '<b>✓</b>' : ''}</button>
+  `).join('');
+
+  modal.classList.add('cse-verdant-window');
+  const logo = modal.querySelector('.cse-mc-logo');
+  if (logo) logo.textContent = 'Chess Stats';
+  grid.className = 'cse-mc-grid cse-verdant-shell';
+  grid.innerHTML = `
+    <div class="cse-verdant-scroll">
+      ${renderSection('automation', 'Automation', ['AutoMove', 'AutoPlay', 'PuzzleRush'])}
+      ${renderSection('analysis', 'Analysis', ['EvaluationBar', 'SuggestMove', 'GameInsights'])}
+      ${renderSection('interface', 'Interface', ['GUI', 'ToxicChat'])}
+      ${renderSection('security', 'Security', [], '<div class="cse-verdant-note">Player protection tools run on demand.</div>')}
+      <div class="cse-verdant-divider"><span>OTHER</span></div>
+      <div class="cse-verdant-other-row"><span>Account</span><i></i></div>
+      <section class="cse-verdant-section cse-verdant-themes ${cseGuiState.verdantSections.themes ? 'is-expanded' : ''}" data-verdant-section="themes">
+        <button type="button" class="cse-verdant-section-title" data-section-toggle="themes" aria-expanded="${cseGuiState.verdantSections.themes ? 'true' : 'false'}"><span>Themes</span><em>Verdant</em><i></i></button>
+        <div class="cse-verdant-section-body">${themeOptions}</div>
+      </section>
+    </div>
+    <footer class="cse-verdant-footer" aria-hidden="true"><span>♙</span><span>☆</span><span>▥</span></footer>
+  `;
+
+  grid.querySelectorAll('[data-section-toggle]').forEach(button => {
+    button.addEventListener('click', () => {
+      const id = button.dataset.sectionToggle;
+      cseGuiState.verdantSections[id] = !cseGuiState.verdantSections[id];
+      cseSaveState();
+      cseRenderGui();
+    });
+  });
+  grid.querySelectorAll('[data-module-toggle]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleCseGuiModule(modulesById[button.dataset.moduleToggle]);
+    });
+  });
+  grid.querySelectorAll('.cse-verdant-module').forEach(row => {
+    row.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const id = row.dataset.moduleId;
+      cseGuiState.openSettings = cseGuiState.openSettings === id ? null : id;
+      cseRenderGui();
+    });
+  });
+  grid.querySelectorAll('[data-verdant-theme]').forEach(button => {
+    button.addEventListener('click', () => {
+      const nextTheme = button.dataset.verdantTheme;
+      if (!['aurora', 'blockforge', 'voidos', 'claude', 'verdant'].includes(nextTheme)) return;
+      uiTheme = nextTheme;
+      cseGuiState.openSettings = null;
+      applyUiTheme();
+      cseSaveState();
+      cseRenderGui();
+    });
+  });
+
+  const overlay = modal.querySelector('#cse-mc-settings-overlay');
+  const host = cseGuiState.openSettings
+    ? grid.querySelector(`[data-settings-host="${cseGuiState.openSettings}"]`)
+    : null;
+  if (host && modulesById[cseGuiState.openSettings]) {
+    cseRenderSettingsPanel(cseGuiState.openSettings);
+    if (overlay) host.appendChild(overlay);
+  } else if (overlay) {
+    cseGuiState.openSettings = null;
+    overlay.style.display = 'none';
+    overlay.classList.remove('is-open', 'is-closing');
+  }
+  cseSyncAnimatedRanges(grid);
+  syncGuiHudPanel();
+}
+
 function cseRenderGui() {
   const modal = document.getElementById('cse-mc-gui');
   if (!modal) return;
+  const settingsOverlay = modal.querySelector('#cse-mc-settings-overlay');
+  if (settingsOverlay && settingsOverlay.parentElement !== modal) modal.appendChild(settingsOverlay);
   const tab = cseGuiState.activeTab;
 
   const allMods = [
@@ -4300,6 +4475,13 @@ function cseRenderGui() {
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
   ];
+  if (uiTheme === 'verdant') {
+    cseRenderVerdantGui(modal, allMods);
+    return;
+  }
+  modal.classList.remove('cse-verdant-window');
+  const logo = modal.querySelector('.cse-mc-logo');
+  if (logo) logo.textContent = 'Chess Stats';
   const mods = allMods.filter(m => tab === 'ALL' || (tab === 'FAVORITE' && cseGuiState.favorites[m.id]));
 
   modal.querySelectorAll('.cse-mc-tab').forEach(t => {
@@ -4751,59 +4933,7 @@ function cseRenderGui() {
         card.classList.add('cse-mc-card-activating');
         setTimeout(() => card.classList.remove('cse-mc-card-activating'), 200);
       };
-      const finalizeModuleToggle = () => {
-      if (mod.id === 'AutoMove') {
-        setAutomoveEnabled(!isAutomoveEnabled);
-        return;
-      } else if (mod.id === 'PuzzleRush') {
-        isPuzzleRushEnabled = !isPuzzleRushEnabled;
-        clearPuzzleRushDepthFallback();
-        if (!isPuzzleRushEnabled) {
-          clearAutomoveSchedule();
-          if (!isAutomoveEnabled) stopAutomoveUiTicker();
-        } else {
-          startAutomoveUiTicker();
-        }
-      } else if (mod.id === 'AutoPlay') {
-        isAutoPlayEnabled = !isAutoPlayEnabled;
-        if (!isAutoPlayEnabled) {
-          clearAutoPlaySchedule(true);
-          stopAutoPlayTicker();
-        } else {
-          startAutoPlayTicker();
-        }
-      } else if (mod.id === 'ToxicChat') {
-        isToxicChatEnabled = !isToxicChatEnabled;
-        if (!isToxicChatEnabled) {
-          stopToxicChatTicker();
-          clearToxicChatState();
-        } else {
-          startToxicChatTicker();
-        }
-      } else if (mod.id === 'GameInsights') {
-        isGameInsightsEnabled = !isGameInsightsEnabled;
-        window.CSEGameInsights?.setEnabled?.(isGameInsightsEnabled);
-        window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
-      } else if (mod.id === 'SuggestMove') {
-        setSuggestMoveEnabled(!arrowsEnabled);
-        return;
-      } else if (mod.id === 'EvaluationBar') {
-        isEvalBarEnabled = !isEvalBarEnabled;
-        if (isEvalBarEnabled) createEvaluationBarPanel();
-        else removeEvaluationBarPanel();
-      } else if (mod.id === 'GUI') {
-        isGuiHudEnabled = !isGuiHudEnabled;
-        syncGuiHudPanel();
-      }
-
-      ensureEvalEngineState(true);
-      if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
-      updateAutomoveButtonState();
-      syncGuiHudPanel();
-      cseSaveState();
-      cseNotify('moduleUpdate', mod.label + (mod.active ? ' disabled' : ' enabled'), 'Module state updated', { id: 'module-' + mod.id });
-      cseRenderGui();
-      };
+      const finalizeModuleToggle = () => toggleCseGuiModule(mod);
       if (!wasActive) {
         activateAnim();
         setTimeout(finalizeModuleToggle, 120);
@@ -5095,6 +5225,7 @@ function cseRenderSettingsPanel(modId) {
     window.setTimeout(() => {
       ov.style.display = 'none';
       ov.classList.remove('is-closing');
+      if (uiTheme === 'verdant') cseRenderGui();
     }, 240);
   };
 
@@ -5141,7 +5272,7 @@ function cseRenderSettingsPanel(modId) {
     window.removeEventListener('pointercancel', stopDrag);
   };
 
-  header.addEventListener('pointerdown', e => {
+  if (uiTheme !== 'verdant') header.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
     if (e.target.closest('#cse-mc-sp-close')) return;
     e.preventDefault();
@@ -5171,7 +5302,9 @@ function cseRenderSettingsPanel(modId) {
   if (isAuto) {
     ov.querySelectorAll('.cse-mc-mbtn').forEach(btn => {
       btn.addEventListener('click', () => {
-        automoveMode = btn.dataset.mode;
+        automoveMode = uiTheme === 'verdant' && btn.classList.contains('cse-mc-mbtn-on')
+          ? (automoveMode === 'legit' ? 'blatant' : 'legit')
+          : btn.dataset.mode;
         ov.querySelectorAll('.cse-mc-mbtn').forEach(b => b.classList.toggle('cse-mc-mbtn-on', b.dataset.mode === automoveMode));
         evalCache.clear();
         lastEvalFen = null;
@@ -5450,6 +5583,7 @@ function createToolsGui() {
 
   modal.innerHTML = `
     <div class="cse-mc-header" id="cse-mc-drag">
+      <div class="cse-mc-logo">Chess Stats</div>
       <div class="cse-mc-tabs">
         <button class="cse-mc-tab" data-tab="ALL" style="color:#fff;border-bottom:2px solid #4a9e5c;">${SVG_ALL} ALL</button>
         <button class="cse-mc-tab" data-tab="FAVORITE" style="color:#555;border-bottom:2px solid transparent;">${SVG_FAV} FAVORITE</button>
