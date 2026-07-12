@@ -115,7 +115,7 @@ const MAIA_ELO_MAX = 1900;
 const MAIA_ELO_STEP = 100;
 const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
 const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
-const MAIA_LOCAL_BOOT_TIMEOUT_MS = 9000;
+const MAIA_LOCAL_BOOT_TIMEOUT_MS = 30000;
 const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 1800;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
