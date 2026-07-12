@@ -60,6 +60,7 @@ let uiNotifications = {
   analysisWarning: false,
   moduleUpdate: false,
 };
+let notificationPosition = 'bottom-right';
 let evalBarDisplayMode = 'bar'; // 'bar' | 'percent'
 let stockfishFailureStreak = 0;
 let stockfishFailureSinceAt = 0;
@@ -115,8 +116,7 @@ const MAIA_ELO_STEP = 100;
 const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
 const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
 const MAIA_LOCAL_BOOT_TIMEOUT_MS = 9000;
-const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 900;
-const MAIA_LOCAL_MOVE_TIME_MS = 70;
+const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 600;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -172,6 +172,7 @@ function cseSaveState() {
       uiDensity,
       uiMotionEnabled,
       notifications: { ...uiNotifications },
+      notificationPosition,
     },
     evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
   };
@@ -2962,7 +2963,8 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
 
     try {
       worker.postMessage(`position fen ${fen}`);
-      worker.postMessage(`go movetime ${MAIA_LOCAL_MOVE_TIME_MS}`);
+      // Restore the original fast local Maia search behavior.
+      worker.postMessage('go nodes 1');
     } catch (err) {
       clearLocalMaiaSearch(null);
     }
@@ -3195,9 +3197,11 @@ async function fetchEval(fen) {
     addFrom(payload?.continuation);
     return normalizeTopMoves(collected);
   };
-  const allowApiFallback = stockfishProvider === 'api' || stockfishProvider === 'local';
+  const allowApiFallback = activeEngineId !== 'maia' && (stockfishProvider === 'api' || stockfishProvider === 'local');
 
   if (activeEngineId === 'maia') {
+    // Maia is local-only: do not replace a slow/failed Maia response with
+    // Stockfish or the remote API, which made latency and behavior inconsistent.
     releaseLocalStockfishEngine();
     try {
       const maiaResult = await runLocalMaiaEval(fen, queryDepth, signal);
@@ -3206,13 +3210,16 @@ async function fetchEval(fen) {
         registerEvalSuccess();
         return maiaResult;
       }
+      registerEvalFailure();
+      return null;
     } catch (e) {
       if (e?.name === 'AbortError') return null;
+      registerEvalFailure();
       releaseLocalMaiaEngine();
+      return null;
     }
-  } else {
-    releaseLocalMaiaEngine();
   }
+  releaseLocalMaiaEngine();
 
   if (isLocalStockfishProvider()) {
     try {
@@ -3830,6 +3837,9 @@ function applySavedGuiAndModuleState() {
         if (typeof saved.settings.notifications[key] === 'boolean') uiNotifications[key] = saved.settings.notifications[key];
       }
     }
+    if (['bottom-right','bottom-left','top-right','top-left'].includes(saved.settings.notificationPosition)) {
+      notificationPosition = saved.settings.notificationPosition;
+    }
   }
 }
 
@@ -3840,6 +3850,7 @@ function applyUiTheme() {
   root.dataset.cseAccent = uiAccent;
   root.dataset.cseDensity = uiDensity;
   root.dataset.cseMotion = uiMotionEnabled ? 'on' : 'off';
+  root.dataset.cseNotificationPosition = notificationPosition;
   if (document.body) {
     document.body.dataset.cseTheme = theme;
     document.body.dataset.cseAccent = uiAccent;
@@ -3877,9 +3888,11 @@ function cseNotify(key, title, message = '', options = {}) {
     tray = document.createElement('aside');
     tray.id = 'cse-toast-tray';
     tray.className = 'cse-toast-tray';
+    tray.dataset.position = notificationPosition;
     tray.setAttribute('aria-live', 'polite');
     document.body.appendChild(tray);
   }
+  tray.dataset.position = notificationPosition;
   const toast = document.createElement('button');
   toast.type = 'button';
   toast.className = `cse-toast cse-toast-${key}`;
@@ -4333,6 +4346,16 @@ function cseRenderGui() {
           </div>
         ` : activeSettingsSection === 'notifications' ? `
           <div class="cse-gs-page"><div class="cse-gs-header"><div class="cse-gs-title">Notifications</div><div class="cse-gs-subtitle">Persistent in-client alerts for important events.</div></div>
+            <div class="cse-gs-block"><div class="cse-gs-block-kicker">POSITION</div>
+              <div class="cse-gs-row"><div class="cse-gs-row-left"><span class="cse-gs-row-icon">⌖</span><span><span class="cse-gs-row-title">Notification position</span><span class="cse-gs-row-sub">Choose where alerts appear.</span></span></div>
+                <select id="cse-notification-position" class="cse-gs-select">
+                  <option value="bottom-right" ${notificationPosition === 'bottom-right' ? 'selected' : ''}>Bottom right</option>
+                  <option value="bottom-left" ${notificationPosition === 'bottom-left' ? 'selected' : ''}>Bottom left</option>
+                  <option value="top-right" ${notificationPosition === 'top-right' ? 'selected' : ''}>Top right</option>
+                  <option value="top-left" ${notificationPosition === 'top-left' ? 'selected' : ''}>Top left</option>
+                </select>
+              </div>
+            </div>
             <div class="cse-gs-block"><div class="cse-gs-block-kicker">EVENT MATRIX</div>${[
               ['engineReady','Engine ready','The selected analysis engine is available.'],
               ['gameFinished','Game finished','Show the final result and recap alert.'],
@@ -4410,6 +4433,17 @@ function cseRenderGui() {
       uiMotionEnabled = !!motionToggle.checked;
       applyUiTheme(); cseSaveState();
     });
+    const positionSelect = grid.querySelector('#cse-notification-position');
+    if (positionSelect) positionSelect.addEventListener('change', () => {
+      notificationPosition = ['bottom-right','bottom-left','top-right','top-left'].includes(positionSelect.value)
+        ? positionSelect.value : 'bottom-right';
+      document.documentElement.dataset.cseNotificationPosition = notificationPosition;
+      if (document.body) document.body.dataset.cseNotificationPosition = notificationPosition;
+      const tray = document.getElementById('cse-toast-tray');
+      if (tray) tray.dataset.position = notificationPosition;
+      cseSaveState();
+    });
+
     grid.querySelectorAll('[data-notification-key]').forEach(toggle => {
       toggle.addEventListener('change', () => {
         const key = toggle.dataset.notificationKey;

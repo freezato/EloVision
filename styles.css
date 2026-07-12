@@ -2343,3 +2343,20 @@
 @keyframes cse-preview-scan { 0%,55%{transform:translateX(0)}85%,100%{transform:translateX(650%)} }
 .cse-mc-running-dot { animation:cse-running-dot 1.7s ease-in-out infinite !important; }
 @keyframes cse-running-dot { 50%{transform:scale(1.35);box-shadow:0 0 0 5px rgba(var(--cse-accent-rgb),0)} }
+
+
+/* Notification placement (default: bottom right). */
+.cse-toast-tray[data-position="bottom-right"] { top:auto;right:18px;bottom:18px;left:auto;flex-direction:column-reverse; }
+.cse-toast-tray[data-position="bottom-left"] { top:auto;right:auto;bottom:18px;left:18px;flex-direction:column-reverse; }
+.cse-toast-tray[data-position="top-right"] { top:18px;right:18px;bottom:auto;left:auto;flex-direction:column; }
+.cse-toast-tray[data-position="top-left"] { top:18px;right:auto;bottom:auto;left:18px;flex-direction:column; }
+
+/* Live move badges are siblings of Chess.com's notation nodes. */
+.cse-move-quality[data-cse-ply] {
+  flex:0 0 auto;
+  position:relative;
+  z-index:2;
+  margin-inline:4px 2px;
+  pointer-events:auto;
+  animation:cse-quality-pop .24s cubic-bezier(.2,.9,.3,1.5) both;
+}
