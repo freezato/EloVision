@@ -22,6 +22,7 @@
     evalByFen: new Map(),
     analysedMoveKeys: new Set(),
     badgeByPly: new Map(),
+    pendingMoves: new Map(),
     lastObservedPly: null,
     syncFrame: 0,
     retryTimers: new Set(),
@@ -145,6 +146,7 @@
     state.evalByFen.clear();
     state.analysedMoveKeys.clear();
     state.badgeByPly.clear();
+    state.pendingMoves.clear();
     state.lastObservedPly = null;
     state.stats = createEmptyStats();
     if (state.syncFrame) cancelAnimationFrame(state.syncFrame);
@@ -182,6 +184,7 @@
         bestMove: typeof snapshot.bestMove === 'string' ? snapshot.bestMove.toLowerCase() : null,
       });
       trimMap(state.evalByFen, MAX_EVALS);
+      flushPendingMoves();
     }
     scheduleBadgeSync();
     if (snapshot.gameOver && state.gameToken && state.recapShownForToken !== state.gameToken) {
@@ -272,6 +275,14 @@
     scheduleBadgeRetries();
   }
 
+  function flushPendingMoves() {
+    for (const [key, snapshot] of Array.from(state.pendingMoves.entries())) {
+      if (!state.evalByFen.has(snapshot.fenBefore) || !state.evalByFen.has(snapshot.fenAfter)) continue;
+      state.pendingMoves.delete(key);
+      handleMove(snapshot);
+    }
+  }
+
   function handleMove(snapshot) {
     if (!state.enabled || !snapshot?.fenBefore || !snapshot?.fenAfter) return;
     const key = `${snapshot.fenBefore}>${snapshot.fenAfter}`;
@@ -279,7 +290,12 @@
     const before = state.evalByFen.get(snapshot.fenBefore);
     const after = state.evalByFen.get(snapshot.fenAfter);
     const mover = getFenTurn(snapshot.fenBefore);
-    if (!before || !after || !mover) return;
+    if (!before || !after || !mover) {
+      state.pendingMoves.set(key, { ...snapshot });
+      trimMap(state.pendingMoves, MAX_BADGES);
+      return;
+    }
+    state.pendingMoves.delete(key);
 
     const cpl = evaluationLoss(before, after, mover);
     const uci = (snapshot.uci || inferUciFromFens(snapshot.fenBefore, snapshot.fenAfter) || '').toLowerCase() || null;

@@ -116,7 +116,7 @@ const MAIA_ELO_STEP = 100;
 const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
 const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
 const MAIA_LOCAL_BOOT_TIMEOUT_MS = 9000;
-const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 600;
+const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 1800;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
 
 function cseReadState() {
@@ -2819,7 +2819,11 @@ function onLocalMaiaMessage(event) {
 
   if (line.startsWith('bestmove ')) {
     const bestMove = extractUciMove(line);
-    const result = buildLocalStockfishResult(search.turn, bestMove, search.linesByPv);
+    // Maia's LC0 worker may emit bestmove before an info score at nodes=1.
+    // AutoMove only needs the move; Stockfish supplies Game Insights scores.
+    const result = buildLocalStockfishResult(search.turn, bestMove, search.linesByPv) || (
+      bestMove ? { cp: null, mate: null, bestMove, topMoves: [bestMove], pvLines: [] } : null
+    );
     if (result) {
       result.engine = 'maia';
       result.maiaElo = search.elo;
@@ -2969,6 +2973,28 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
       clearLocalMaiaSearch(null);
     }
   });
+}
+
+const gameInsightsStockfishJobs = new Map();
+function queueGameInsightsStockfishEval(fen, ply) {
+  if (!isGameInsightsEnabled || !fen || gameInsightsStockfishJobs.has(fen)) return;
+  const depth = Math.max(4, Math.min(6, suggestMoveDepth));
+  const job = runLocalStockfishEval(fen, depth, null)
+    .then(result => {
+      if (!result || !isGameInsightsEnabled) return;
+      window.CSEGameInsights?.handleEval?.({
+        fen,
+        ply,
+        cp: Number.isFinite(result.cp) ? result.cp : null,
+        mate: Number.isFinite(result.mate) ? result.mate : null,
+        bestMove: result.bestMove || null,
+        topMoves: Array.isArray(result.topMoves) ? result.topMoves.slice(0, 4) : [],
+        gameOver: isGameOverVisible(),
+      });
+    })
+    .catch(() => {})
+    .finally(() => gameInsightsStockfishJobs.delete(fen));
+  gameInsightsStockfishJobs.set(fen, job);
 }
 
 function getEvalFenCacheToken(fen) {
@@ -3149,6 +3175,7 @@ async function fetchEval(fen) {
   const cached = getCachedEval(fen, queryDepth, engineToken);
   if (cached) {
     registerEvalSuccess();
+    if (activeEngineId === 'maia') queueGameInsightsStockfishEval(fen, getReliablePlyCount());
     return cached;
   }
 
@@ -3202,12 +3229,13 @@ async function fetchEval(fen) {
   if (activeEngineId === 'maia') {
     // Maia is local-only: do not replace a slow/failed Maia response with
     // Stockfish or the remote API, which made latency and behavior inconsistent.
-    releaseLocalStockfishEngine();
+    if (!isGameInsightsEnabled) releaseLocalStockfishEngine();
     try {
       const maiaResult = await runLocalMaiaEval(fen, queryDepth, signal);
       if (maiaResult) {
         setCachedEval(fen, queryDepth, maiaResult, engineToken);
         registerEvalSuccess();
+        queueGameInsightsStockfishEval(fen, getReliablePlyCount());
         return maiaResult;
       }
       registerEvalFailure();
