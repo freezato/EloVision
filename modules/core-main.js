@@ -113,7 +113,6 @@ const STOCKFISH_LOCAL_SCRIPT_PATH = 'modules/stockfish/stockfish.js';
 const MAIA_ELO_MIN = 1100;
 const MAIA_ELO_MAX = 1900;
 const MAIA_ELO_STEP = 100;
-const MAIA_LOCAL_SCRIPT_PATH = 'modules/maia/maia.js';
 const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
 const MAIA_LOCAL_BOOT_TIMEOUT_MS = 30000;
 const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 1800;
@@ -2486,37 +2485,55 @@ let localStockfishInitPromise = null;
 let localStockfishSearchId = 0;
 let localStockfishCurrentSearch = null;
 let localMaiaWorker = null;
-let localMaiaWorkerBlobUrl = null;
 let localMaiaInitPromise = null;
+let localMaiaInitAttempt = null;
+let localMaiaGeneration = 0;
 let localMaiaSearchId = 0;
 let localMaiaCurrentSearch = null;
 let localMaiaLoadedElo = null;
+const localMaiaRuntimeErrorHandlers = new WeakMap();
 
 function createLocalMaiaPortWorker() {
   const port = chrome.runtime.connect({ name: 'cse-maia-client' });
   const listeners = { message: new Set(), error: new Set() };
   let terminated = false;
-  const emit = (type, event) => listeners[type]?.forEach(fn => {
+  let disconnected = false;
+  const emit = (type, event) => Array.from(listeners[type] || []).forEach(fn => {
     try { fn(event); } catch {}
   });
+  const disconnectWithError = message => {
+    if (terminated || disconnected) return;
+    disconnected = true;
+    emit('error', { message: message || 'Maia offscreen connection closed' });
+  };
   port.onMessage.addListener(payload => {
     if (payload?.type === 'message') emit('message', { data: payload.data });
     if (payload?.type === 'error') emit('error', { message: payload.message || 'Maia offscreen error' });
   });
   port.onDisconnect.addListener(() => {
-    if (!terminated) emit('error', { message: chrome.runtime.lastError?.message || 'Maia offscreen connection closed' });
+    const message = chrome.runtime.lastError?.message || 'Maia offscreen connection closed';
+    disconnectWithError(message);
   });
   return {
     postMessage(data) {
-      if (!terminated) port.postMessage({ type: 'command', data });
+      if (terminated || disconnected) throw new Error('Maia offscreen connection is closed');
+      try {
+        port.postMessage({ type: 'command', data });
+      } catch (error) {
+        disconnectWithError(error?.message || String(error));
+        throw error;
+      }
     },
     addEventListener(type, fn) { listeners[type]?.add(fn); },
     removeEventListener(type, fn) { listeners[type]?.delete(fn); },
     terminate() {
       if (terminated) return;
       terminated = true;
-      try { port.postMessage({ type: 'terminate' }); } catch {}
+      if (!disconnected) {
+        try { port.postMessage({ type: 'terminate' }); } catch {}
+      }
       try { port.disconnect(); } catch {}
+      disconnected = true;
       listeners.message.clear();
       listeners.error.clear();
     },
@@ -2803,9 +2820,8 @@ async function runLocalStockfishEval(fen, queryDepth, signal) {
   });
 }
 
-function clearLocalMaiaSearch(result = null, { aborted = false } = {}) {
-  const search = localMaiaCurrentSearch;
-  if (!search || search.done) return;
+function finishLocalMaiaSearch(search, result = null, { aborted = false } = {}) {
+  if (!search || search.done || localMaiaCurrentSearch !== search) return false;
   search.done = true;
   if (search.timeoutId) clearTimeout(search.timeoutId);
   if (search.signal && search.abortHandler) {
@@ -2814,34 +2830,78 @@ function clearLocalMaiaSearch(result = null, { aborted = false } = {}) {
   localMaiaCurrentSearch = null;
   if (aborted) search.reject(makeAbortError());
   else search.resolve(result);
+  return true;
 }
 
-function releaseLocalMaiaEngine() {
-  if (localMaiaWorker) {
+function attachLocalMaiaRuntimeListeners(worker) {
+  if (!worker || localMaiaRuntimeErrorHandlers.has(worker)) return;
+  const errorHandler = event => onLocalMaiaError(event, worker);
+  localMaiaRuntimeErrorHandlers.set(worker, errorHandler);
+  worker.addEventListener('message', onLocalMaiaMessage);
+  worker.addEventListener('error', errorHandler);
+}
+
+function releaseLocalMaiaEngine(expectedWorker = null) {
+  const worker = expectedWorker || localMaiaWorker;
+  const attempt = localMaiaInitAttempt;
+  const ownsCurrentWorker = !!worker && localMaiaWorker === worker;
+  const ownsInitAttempt = !!(attempt && (!worker || attempt.worker === worker));
+
+  if (expectedWorker && !ownsCurrentWorker && !ownsInitAttempt) {
+    try { expectedWorker.terminate(); } catch {}
+    return;
+  }
+
+  if (ownsInitAttempt) {
+    localMaiaInitAttempt = null;
+    if (localMaiaInitPromise === attempt.promise) localMaiaInitPromise = null;
+  }
+  if (!expectedWorker || ownsCurrentWorker) {
+    localMaiaWorker = null;
+    localMaiaLoadedElo = null;
+    localMaiaGeneration += 1;
+  }
+
+  const search = localMaiaCurrentSearch;
+  if (search && !search.done && (!worker || search.worker === worker)) {
+    finishLocalMaiaSearch(search, null);
+  }
+
+  if (ownsInitAttempt) {
+    attempt.cancel(makeAbortError());
+  }
+
+  if (worker) {
+    const runtimeErrorHandler = localMaiaRuntimeErrorHandlers.get(worker);
     try {
-      localMaiaWorker.removeEventListener('message', onLocalMaiaMessage);
-      localMaiaWorker.removeEventListener('error', onLocalMaiaError);
+      worker.removeEventListener('message', onLocalMaiaMessage);
+      if (runtimeErrorHandler) worker.removeEventListener('error', runtimeErrorHandler);
     } catch {}
-    try { localMaiaWorker.postMessage('quit'); } catch {}
-    try { localMaiaWorker.terminate(); } catch {}
-  }
-  localMaiaWorker = null;
-  localMaiaLoadedElo = null;
-
-  if (localMaiaWorkerBlobUrl) {
-    try { URL.revokeObjectURL(localMaiaWorkerBlobUrl); } catch {}
-    localMaiaWorkerBlobUrl = null;
+    localMaiaRuntimeErrorHandlers.delete(worker);
+    try { worker.postMessage('quit'); } catch {}
+    try { worker.terminate(); } catch {}
   }
 
-  if (localMaiaCurrentSearch && !localMaiaCurrentSearch.done) {
-    clearLocalMaiaSearch(null);
-  }
 }
 
 function onLocalMaiaMessage(event) {
-  const line = String(event?.data || '').trim();
+  const payload = event?.data;
+  const line = String(
+    payload && typeof payload === 'object' ? payload.line || payload.data || '' : payload || ''
+  ).trim();
+  const messageSearchId = payload && typeof payload === 'object' && Number.isSafeInteger(payload.searchId)
+    ? payload.searchId
+    : null;
   const search = localMaiaCurrentSearch;
   if (!search || search.done || !line) return;
+  if (messageSearchId !== search.id) return;
+
+  if (line.startsWith('info string Maia worker error:')) {
+    console.error('[CSE][Maia]', line);
+    finishLocalMaiaSearch(search, null);
+    releaseLocalMaiaEngine(search.worker);
+    return;
+  }
 
   if (line.startsWith('info ')) {
     parseLocalStockfishInfoLine(line, search.linesByPv);
@@ -2850,6 +2910,16 @@ function onLocalMaiaMessage(event) {
 
   if (line.startsWith('bestmove ')) {
     const bestMove = extractUciMove(line);
+    if (bestMove && !isMoveConsistentWithFen(bestMove, search.fen)) {
+      console.error('[CSE][Maia] engine returned a move for the wrong position', {
+        searchId: search.id,
+        fen: search.fen,
+        bestMove,
+      });
+      finishLocalMaiaSearch(search, null);
+      releaseLocalMaiaEngine(search.worker);
+      return;
+    }
     // Maia's LC0 worker may emit bestmove before an info score at nodes=1.
     // AutoMove only needs the move; Stockfish supplies Game Insights scores.
     const result = buildLocalStockfishResult(search.turn, bestMove, search.linesByPv) || (
@@ -2859,110 +2929,134 @@ function onLocalMaiaMessage(event) {
       result.engine = 'maia';
       result.maiaElo = search.elo;
     }
-    clearLocalMaiaSearch(result);
+    finishLocalMaiaSearch(search, result);
   }
 }
 
-function onLocalMaiaError(event) {
-  console.error('[CSE][Maia] worker runtime error', event?.message || event);
-  clearLocalMaiaSearch(null);
-  releaseLocalMaiaEngine();
+function onLocalMaiaError(event, worker = localMaiaWorker) {
+  if (worker !== localMaiaWorker && localMaiaInitAttempt?.worker !== worker) return;
+  console.error('[CSE][Maia] bridge/worker error', event?.message || event);
+  const search = localMaiaCurrentSearch;
+  if (search?.worker === worker) finishLocalMaiaSearch(search, null);
+  releaseLocalMaiaEngine(worker);
 }
 
 function ensureLocalMaiaEngine() {
   const elo = normalizeMaiaElo(maiaElo);
+  if (localMaiaInitAttempt) {
+    if (localMaiaInitAttempt.elo === elo) return localMaiaInitAttempt.promise;
+    releaseLocalMaiaEngine(localMaiaInitAttempt.worker);
+  }
   if (localMaiaWorker && localMaiaLoadedElo === elo) return Promise.resolve(localMaiaWorker);
   if (localMaiaWorker && localMaiaLoadedElo !== elo) releaseLocalMaiaEngine();
-  if (localMaiaInitPromise) return localMaiaInitPromise;
 
-  localMaiaInitPromise = (async () => {
-    const scriptUrl = chrome.runtime.getURL(MAIA_LOCAL_SCRIPT_PATH);
-    const weightsUrl = chrome.runtime.getURL(getMaiaWeightsPath(elo));
-    // LC0 requires SharedArrayBuffer. Run it in an offscreen extension page,
-    // not in the Chess.com content-script agent cluster.
-    const worker = createLocalMaiaPortWorker();
-    localMaiaWorker = worker;
-    localMaiaWorkerBlobUrl = null;
+  const weightsUrl = chrome.runtime.getURL(getMaiaWeightsPath(elo));
+  // LC0 requires SharedArrayBuffer. Run it in an offscreen extension page,
+  // not in the Chess.com content-script agent cluster.
+  const worker = createLocalMaiaPortWorker();
+  const generation = ++localMaiaGeneration;
+  localMaiaWorker = worker;
+  localMaiaLoadedElo = null;
 
-    await new Promise((resolve, reject) => {
-      let done = false;
-      let sentReady = false;
-      const timer = setTimeout(() => {
+  let cancelInit = () => {};
+  const readyPromise = new Promise((resolve, reject) => {
+    let done = false;
+    let sentReady = false;
+    let timer = 0;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      try { worker.removeEventListener('message', onInitMessage); } catch {}
+      try { worker.removeEventListener('error', onInitError); } catch {}
+    };
+    const fail = error => {
+      if (done) return;
+      done = true;
+      cleanup();
+      const failure = error && typeof error === 'object' && typeof error.message === 'string'
+        ? error
+        : new Error(String(error || 'local-maia-init-error'));
+      reject(failure);
+    };
+    const onInitError = event => {
+      const detail = event?.message || 'unknown module-worker error';
+      fail(new Error('local-maia-init-error: ' + detail));
+    };
+    const onInitMessage = evt => {
+      const data = evt?.data;
+      const text = String(data && typeof data === 'object' ? data.line || data.data || '' : data || '').trim();
+      if (text.startsWith('info string Maia worker error:')) {
+        onInitError({ message: text });
+        return;
+      }
+      if (text === 'uciok' && !sentReady) {
+        sentReady = true;
+        try {
+          worker.postMessage(`setoption name WeightsFile value ${weightsUrl}`);
+          worker.postMessage('setoption name Threads value 1');
+          worker.postMessage('setoption name MinibatchSize value 1');
+          worker.postMessage('isready');
+        } catch (error) {
+          onInitError(error);
+        }
+        return;
+      }
+      if (text === 'readyok') {
         if (done) return;
+        // Install runtime listeners before removing init listeners, so a
+        // disconnect in the ready transition cannot be lost.
+        attachLocalMaiaRuntimeListeners(worker);
         done = true;
         cleanup();
-        reject(new Error('local-maia-init-timeout'));
-      }, MAIA_LOCAL_BOOT_TIMEOUT_MS);
+        resolve();
+      }
+    };
 
-      const cleanup = () => {
-        clearTimeout(timer);
-        try { worker.removeEventListener('message', onInitMessage); } catch {}
-        try { worker.removeEventListener('error', onInitError); } catch {}
-      };
-
-      const onInitError = event => {
-        if (done) return;
-        done = true;
-        cleanup();
-        const detail = event?.message || 'unknown module-worker error';
-        console.error('[CSE][Maia] initialization failed:', detail, event);
-        reject(new Error('local-maia-init-error: ' + detail));
-      };
-
-      const onInitMessage = (evt) => {
-        const text = String(evt?.data || '').trim();
-        if (text.startsWith('info string Maia worker error:')) {
-          console.error('[CSE][Maia]', text);
-          onInitError({ message: text });
-          return;
-        }
-        if (text === 'uciok' && !sentReady) {
-          sentReady = true;
-          try {
-            worker.postMessage(`setoption name WeightsFile value ${weightsUrl}`);
-            worker.postMessage('setoption name Threads value 1');
-            worker.postMessage('setoption name MinibatchSize value 1');
-            worker.postMessage('isready');
-          } catch (err) {
-            onInitError(err);
-          }
-          return;
-        }
-        if (text === 'readyok') {
-          if (done) return;
-          done = true;
-          cleanup();
-          resolve();
-        }
-      };
-
-      worker.addEventListener('message', onInitMessage);
-      worker.addEventListener('error', onInitError);
+    cancelInit = reason => fail(reason || makeAbortError());
+    timer = setTimeout(() => fail(new Error('local-maia-init-timeout')), MAIA_LOCAL_BOOT_TIMEOUT_MS);
+    worker.addEventListener('message', onInitMessage);
+    worker.addEventListener('error', onInitError);
+    try {
       worker.postMessage('uci');
-    });
-
-    localMaiaLoadedElo = elo;
-    worker.addEventListener('message', onLocalMaiaMessage);
-    worker.addEventListener('error', onLocalMaiaError);
-    return worker;
-  })().catch((err) => {
-    console.error('[CSE][Maia] local engine unavailable:', err);
-    releaseLocalMaiaEngine();
-    throw err;
-  }).finally(() => {
-    localMaiaInitPromise = null;
+    } catch (error) {
+      onInitError(error);
+    }
   });
 
-  return localMaiaInitPromise;
+  let promise;
+  promise = readyPromise.then(() => {
+    if (localMaiaWorker !== worker || localMaiaGeneration !== generation) throw makeAbortError();
+    localMaiaLoadedElo = elo;
+    return worker;
+  }).catch(error => {
+    if (error?.name !== 'AbortError') {
+      console.error('[CSE][Maia] local engine unavailable:', error);
+    }
+    if (localMaiaWorker === worker || localMaiaInitAttempt?.worker === worker) {
+      releaseLocalMaiaEngine(worker);
+    }
+    throw error;
+  }).finally(() => {
+    if (localMaiaInitAttempt?.promise === promise) localMaiaInitAttempt = null;
+    if (localMaiaInitPromise === promise) localMaiaInitPromise = null;
+  });
+
+  localMaiaInitAttempt = { elo, worker, generation, promise, cancel: cancelInit };
+  localMaiaInitPromise = promise;
+  return promise;
 }
 
 async function runLocalMaiaEval(fen, _queryDepth, signal) {
-  const worker = await ensureLocalMaiaEngine();
+  let worker = await ensureLocalMaiaEngine();
   if (!worker) return null;
+  if (signal?.aborted) throw makeAbortError();
 
   if (localMaiaCurrentSearch && !localMaiaCurrentSearch.done) {
-    try { worker.postMessage('stop'); } catch {}
-    clearLocalMaiaSearch(null);
+    const previousSearch = localMaiaCurrentSearch;
+    finishLocalMaiaSearch(previousSearch, null);
+    releaseLocalMaiaEngine(previousSearch.worker);
+    worker = await ensureLocalMaiaEngine();
+    if (signal?.aborted) throw makeAbortError();
   }
 
   const turn = fen.split(' ')[1] || 'w';
@@ -2974,6 +3068,8 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
       done: false,
       turn,
       elo,
+      fen,
+      worker,
       linesByPv: new Map(),
       timeoutId: 0,
       signal,
@@ -2984,14 +3080,14 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
     localMaiaCurrentSearch = search;
 
     search.timeoutId = setTimeout(() => {
-      try { worker.postMessage('stop'); } catch {}
-      clearLocalMaiaSearch(null);
+      if (!finishLocalMaiaSearch(search, null)) return;
+      releaseLocalMaiaEngine(worker);
     }, MAIA_LOCAL_SEARCH_TIMEOUT_MS);
 
     if (signal) {
       search.abortHandler = () => {
-        try { worker.postMessage('stop'); } catch {}
-        clearLocalMaiaSearch(null, { aborted: true });
+        if (!finishLocalMaiaSearch(search, null, { aborted: true })) return;
+        releaseLocalMaiaEngine(worker);
       };
       if (signal.aborted) {
         search.abortHandler();
@@ -3001,11 +3097,11 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
     }
 
     try {
-      worker.postMessage(`position fen ${fen}`);
+      worker.postMessage({ command: `position fen ${fen}`, searchId: search.id });
       // Restore the original fast local Maia search behavior.
-      worker.postMessage('go nodes 1');
-    } catch (err) {
-      clearLocalMaiaSearch(null);
+      worker.postMessage({ command: 'go nodes 1', searchId: search.id });
+    } catch (error) {
+      if (finishLocalMaiaSearch(search, null)) releaseLocalMaiaEngine(worker);
     }
   });
 }
@@ -5472,13 +5568,26 @@ async function tickEvalBar() {
 
   const fallbackDepthActivated = updatePuzzleRushDepthFallback(fen);
 
-  const sameBoardTurnFen = !!(lastEvalFen && isSameFenBoardAndTurn(fen, lastEvalFen));
+  let sameBoardTurnFen = !!(lastEvalFen && isSameFenBoardAndTurn(fen, lastEvalFen));
+  const existingMove = extractUciMove(currentBestMove);
+  if (sameBoardTurnFen && existingMove && !isMoveConsistentWithFen(existingMove, fen)) {
+    // Never let a stale/invalid engine move mark this position as evaluated.
+    // Clearing the token makes this tick request a fresh Maia result.
+    clearAutomoveSchedule();
+    lastEvalFen = null;
+    lastEvalMoveSourceFen = null;
+    currentBestMove = null;
+    lastEvalTopMoves = [];
+    lastEvalPvLines = [];
+    lastEvalMate = null;
+    sameBoardTurnFen = false;
+  }
   if (sameBoardTurnFen && !fallbackDepthActivated) {
     const hasEvalMoveForFen = !!(
       lastEvalMoveSourceFen &&
       lastEvalFen &&
       isSameFenBoardAndTurn(lastEvalMoveSourceFen, lastEvalFen) &&
-      extractUciMove(currentBestMove)
+      existingMove && isMoveConsistentWithFen(existingMove, lastEvalFen)
     );
     if (arrowsEnabled) syncBestMoveOverlay();
     else hideBestMoveOverlay();
