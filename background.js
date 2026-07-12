@@ -68,16 +68,42 @@ let cseMaiaOffscreenPort = null;
 let cseMaiaClientSeq = 0;
 const cseMaiaQueue = [];
 
+let cseMaiaCreatingOffscreen = null;
+
+async function cseHasMaiaOffscreen() {
+  const offscreenUrl = chrome.runtime.getURL('offscreen.html');
+  if (typeof chrome.runtime.getContexts === 'function') {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [offscreenUrl],
+    });
+    return contexts.length > 0;
+  }
+
+  if (typeof clients !== 'undefined' && typeof clients.matchAll === 'function') {
+    const matchedClients = await clients.matchAll();
+    return matchedClients.some(client => client.url === offscreenUrl);
+  }
+
+  return false;
+}
+
 async function cseEnsureMaiaOffscreen() {
-  if (!chrome.offscreen) throw new Error('chrome.offscreen API unavailable');
-  const exists = await chrome.offscreen.hasDocument();
-  if (!exists) {
-    await chrome.offscreen.createDocument({
+  if (!chrome.offscreen?.createDocument) {
+    throw new Error('chrome.offscreen API unavailable');
+  }
+  if (await cseHasMaiaOffscreen()) return;
+
+  if (!cseMaiaCreatingOffscreen) {
+    cseMaiaCreatingOffscreen = chrome.offscreen.createDocument({
       url: 'offscreen.html',
       reasons: ['WORKERS'],
       justification: 'Run the bundled local Maia LC0 WebAssembly engine.',
+    }).finally(() => {
+      cseMaiaCreatingOffscreen = null;
     });
   }
+  await cseMaiaCreatingOffscreen;
 }
 
 function cseForwardMaia(payload) {
