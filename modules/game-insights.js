@@ -24,6 +24,7 @@
     badgeByPly: new Map(),
     lastObservedPly: null,
     syncFrame: 0,
+    retryTimers: new Set(),
     stats: createEmptyStats(),
   };
 
@@ -148,6 +149,8 @@
     state.stats = createEmptyStats();
     if (state.syncFrame) cancelAnimationFrame(state.syncFrame);
     state.syncFrame = 0;
+    state.retryTimers.forEach(timer => clearTimeout(timer));
+    state.retryTimers.clear();
     document.querySelectorAll('.cse-move-quality').forEach(el => el.remove());
     removeRecap();
   }
@@ -203,22 +206,41 @@
       ? node : node.querySelector?.('.move-text-component, [class*="move-text"]') || node);
   }
 
+  function findNotationTarget(ply, fallbackMoves) {
+    if (!Number.isFinite(ply) || ply < 1) return null;
+    const values = [ply, ply - 1];
+    const attrs = ['data-ply', 'data-ply-index', 'data-move-index'];
+    for (const attr of attrs) {
+      for (const value of values) {
+        const nodes = document.querySelectorAll(`[${attr}="${value}"]`);
+        for (const node of nodes) {
+          if (node.closest?.('#cse-mc-gui, .cse-gi-recap')) continue;
+          const target = node.matches?.('.move-text-component, [class*="move-text"], .move-node-component, .move-node')
+            ? node
+            : node.querySelector?.('.move-text-component, [class*="move-text"], .move-node-component, .move-node') || node;
+          if (target && target.textContent?.trim()) return target;
+        }
+      }
+    }
+    return fallbackMoves[ply - 1] || null;
+  }
+
   function syncMoveBadges() {
     if (!state.enabled) return;
     const moves = getNotationMoves();
     for (const [ply, record] of state.badgeByPly) {
-      const target = moves[ply - 1];
-      if (!target || !QUALITY[record.bucket]) continue;
-      let badge = target.querySelector?.(':scope > .cse-move-quality');
+      const target = findNotationTarget(ply, moves);
+      if (!target || !target.parentNode || !QUALITY[record.bucket]) continue;
+      let badge = document.querySelector(`.cse-move-quality[data-cse-ply="${ply}"]`);
       const quality = QUALITY[record.bucket];
-      if (!badge) {
-        badge = document.createElement('span');
-        target.appendChild(badge);
-      }
+      if (!badge) badge = document.createElement('span');
+      if (badge.previousElementSibling !== target) target.insertAdjacentElement('afterend', badge);
       badge.className = `cse-move-quality cse-quality-${record.bucket}`;
       badge.dataset.cseBucket = record.bucket;
+      badge.dataset.csePly = String(ply);
       badge.textContent = quality.icon;
       badge.title = `${quality.label}${Number.isFinite(record.cpl) ? ` (${record.cpl} CPL)` : ''}`;
+      badge.setAttribute('aria-label', badge.title);
     }
   }
 
@@ -230,6 +252,16 @@
     });
   }
 
+  function scheduleBadgeRetries() {
+    [80, 260, 700].forEach(delay => {
+      const timer = setTimeout(() => {
+        state.retryTimers.delete(timer);
+        scheduleBadgeSync();
+      }, delay);
+      state.retryTimers.add(timer);
+    });
+  }
+
   function handlePositionChange(snapshot) {
     if (!state.enabled || !snapshot?.fenBefore || !snapshot?.fenAfter || !Number.isFinite(snapshot.ply)) return;
     if (!state.badgeByPly.has(snapshot.ply)) {
@@ -237,6 +269,7 @@
       trimMap(state.badgeByPly, MAX_BADGES);
     }
     scheduleBadgeSync();
+    scheduleBadgeRetries();
   }
 
   function handleMove(snapshot) {
@@ -268,6 +301,7 @@
     state.badgeByPly.set(snapshot.ply, record);
     trimMap(state.badgeByPly, MAX_BADGES);
     scheduleBadgeSync();
+    scheduleBadgeRetries();
     if (bucket === 'mistake' || bucket === 'blunder') {
       window.CSENotify?.('analysisWarning', QUALITY[bucket].icon + ' ' + QUALITY[bucket].label, Math.round(cpl) + ' CPL on move ' + snapshot.ply, {
         id: 'analysis-' + snapshot.ply,
