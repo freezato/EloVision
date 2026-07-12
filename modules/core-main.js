@@ -2492,6 +2492,37 @@ let localMaiaSearchId = 0;
 let localMaiaCurrentSearch = null;
 let localMaiaLoadedElo = null;
 
+function createLocalMaiaPortWorker() {
+  const port = chrome.runtime.connect({ name: 'cse-maia-client' });
+  const listeners = { message: new Set(), error: new Set() };
+  let terminated = false;
+  const emit = (type, event) => listeners[type]?.forEach(fn => {
+    try { fn(event); } catch {}
+  });
+  port.onMessage.addListener(payload => {
+    if (payload?.type === 'message') emit('message', { data: payload.data });
+    if (payload?.type === 'error') emit('error', { message: payload.message || 'Maia offscreen error' });
+  });
+  port.onDisconnect.addListener(() => {
+    if (!terminated) emit('error', { message: chrome.runtime.lastError?.message || 'Maia offscreen connection closed' });
+  });
+  return {
+    postMessage(data) {
+      if (!terminated) port.postMessage({ type: 'command', data });
+    },
+    addEventListener(type, fn) { listeners[type]?.add(fn); },
+    removeEventListener(type, fn) { listeners[type]?.delete(fn); },
+    terminate() {
+      if (terminated) return;
+      terminated = true;
+      try { port.postMessage({ type: 'terminate' }); } catch {}
+      try { port.disconnect(); } catch {}
+      listeners.message.clear();
+      listeners.error.clear();
+    },
+  };
+}
+
 function isLocalStockfishProvider() {
   return stockfishProvider === 'local';
 }
@@ -2847,14 +2878,11 @@ function ensureLocalMaiaEngine() {
   localMaiaInitPromise = (async () => {
     const scriptUrl = chrome.runtime.getURL(MAIA_LOCAL_SCRIPT_PATH);
     const weightsUrl = chrome.runtime.getURL(getMaiaWeightsPath(elo));
-    // Content scripts cannot reliably construct a chrome-extension:// module
-    // worker directly. A blob bootstrap inherits the isolated-world origin,
-    // then imports the web-accessible extension module.
-    const bootstrap = `import ${JSON.stringify(scriptUrl)};`;
-    const blobUrl = URL.createObjectURL(new Blob([bootstrap], { type: 'text/javascript' }));
-    const worker = new Worker(blobUrl, { type: 'module', name: 'cse-maia-local' });
+    // LC0 requires SharedArrayBuffer. Run it in an offscreen extension page,
+    // not in the Chess.com content-script agent cluster.
+    const worker = createLocalMaiaPortWorker();
     localMaiaWorker = worker;
-    localMaiaWorkerBlobUrl = blobUrl;
+    localMaiaWorkerBlobUrl = null;
 
     await new Promise((resolve, reject) => {
       let done = false;

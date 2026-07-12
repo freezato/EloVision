@@ -61,3 +61,83 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+
+
+const cseMaiaClients = new Map();
+let cseMaiaOffscreenPort = null;
+let cseMaiaClientSeq = 0;
+const cseMaiaQueue = [];
+
+let cseMaiaCreatingOffscreen = null;
+
+async function cseHasMaiaOffscreen() {
+  const offscreenUrl = chrome.runtime.getURL('offscreen.html');
+  if (typeof chrome.runtime.getContexts === 'function') {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [offscreenUrl],
+    });
+    return contexts.length > 0;
+  }
+
+  if (typeof clients !== 'undefined' && typeof clients.matchAll === 'function') {
+    const matchedClients = await clients.matchAll();
+    return matchedClients.some(client => client.url === offscreenUrl);
+  }
+
+  return false;
+}
+
+async function cseEnsureMaiaOffscreen() {
+  if (!chrome.offscreen?.createDocument) {
+    throw new Error('chrome.offscreen API unavailable');
+  }
+  if (await cseHasMaiaOffscreen()) return;
+
+  if (!cseMaiaCreatingOffscreen) {
+    cseMaiaCreatingOffscreen = chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['WORKERS'],
+      justification: 'Run the bundled local Maia LC0 WebAssembly engine.',
+    }).finally(() => {
+      cseMaiaCreatingOffscreen = null;
+    });
+  }
+  await cseMaiaCreatingOffscreen;
+}
+
+function cseForwardMaia(payload) {
+  if (cseMaiaOffscreenPort) cseMaiaOffscreenPort.postMessage(payload);
+  else cseMaiaQueue.push(payload);
+}
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name === 'cse-maia-offscreen') {
+    cseMaiaOffscreenPort = port;
+    while (cseMaiaQueue.length) port.postMessage(cseMaiaQueue.shift());
+    port.onMessage.addListener(payload => {
+      const client = cseMaiaClients.get(payload?.clientId);
+      if (client) client.postMessage(payload.message);
+    });
+    port.onDisconnect.addListener(() => {
+      cseMaiaOffscreenPort = null;
+      for (const client of cseMaiaClients.values()) {
+        try { client.postMessage({ type: 'error', message: 'Maia offscreen engine disconnected' }); } catch {}
+      }
+    });
+    return;
+  }
+  if (port.name !== 'cse-maia-client') return;
+
+  const clientId = 'maia-' + (++cseMaiaClientSeq);
+  cseMaiaClients.set(clientId, port);
+  cseEnsureMaiaOffscreen().catch(error => {
+    try { port.postMessage({ type: 'error', message: error?.message || String(error) }); } catch {}
+  });
+
+  port.onMessage.addListener(message => cseForwardMaia({ clientId, message }));
+  port.onDisconnect.addListener(() => {
+    cseMaiaClients.delete(clientId);
+    cseForwardMaia({ clientId, message: { type: 'terminate' } });
+  });
+});
