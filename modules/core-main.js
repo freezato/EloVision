@@ -49,7 +49,7 @@ let maiaElo = 1500;
 let generalLanguage = 'en'; // 'en' | 'it'
 let generalNumbersFormat = 'default'; // 'default' | 'eu'
 let generalMinimizeToTray = true;
-let uiTheme = 'aurora'; // 'aurora' | 'blockforge' | 'voidos'
+let uiTheme = 'aurora'; // 'aurora' | 'blockforge' | 'voidos' | 'claude'
 let uiAccent = 'emerald'; // 'emerald' | 'cyan' | 'violet' | 'rose' | 'gold'
 let uiDensity = 'comfortable'; // 'compact' | 'comfortable' | 'spacious'
 let uiMotionEnabled = true;
@@ -2832,7 +2832,8 @@ function onLocalMaiaMessage(event) {
   }
 }
 
-function onLocalMaiaError() {
+function onLocalMaiaError(event) {
+  console.error('[CSE][Maia] worker runtime error', event?.message || event);
   clearLocalMaiaSearch(null);
   releaseLocalMaiaEngine();
 }
@@ -2846,11 +2847,14 @@ function ensureLocalMaiaEngine() {
   localMaiaInitPromise = (async () => {
     const scriptUrl = chrome.runtime.getURL(MAIA_LOCAL_SCRIPT_PATH);
     const weightsUrl = chrome.runtime.getURL(getMaiaWeightsPath(elo));
-    // Maia is an ES module worker because the bundled LC0 runtime uses
-    // import.meta, a WASM module and module-based pthread workers.
-    const worker = new Worker(scriptUrl, { type: 'module', name: 'cse-maia-local' });
+    // Content scripts cannot reliably construct a chrome-extension:// module
+    // worker directly. A blob bootstrap inherits the isolated-world origin,
+    // then imports the web-accessible extension module.
+    const bootstrap = `import ${JSON.stringify(scriptUrl)};`;
+    const blobUrl = URL.createObjectURL(new Blob([bootstrap], { type: 'text/javascript' }));
+    const worker = new Worker(blobUrl, { type: 'module', name: 'cse-maia-local' });
     localMaiaWorker = worker;
-    localMaiaWorkerBlobUrl = null;
+    localMaiaWorkerBlobUrl = blobUrl;
 
     await new Promise((resolve, reject) => {
       let done = false;
@@ -2868,15 +2872,22 @@ function ensureLocalMaiaEngine() {
         try { worker.removeEventListener('error', onInitError); } catch {}
       };
 
-      const onInitError = () => {
+      const onInitError = event => {
         if (done) return;
         done = true;
         cleanup();
-        reject(new Error('local-maia-init-error'));
+        const detail = event?.message || 'unknown module-worker error';
+        console.error('[CSE][Maia] initialization failed:', detail, event);
+        reject(new Error('local-maia-init-error: ' + detail));
       };
 
       const onInitMessage = (evt) => {
         const text = String(evt?.data || '').trim();
+        if (text.startsWith('info string Maia worker error:')) {
+          console.error('[CSE][Maia]', text);
+          onInitError({ message: text });
+          return;
+        }
         if (text === 'uciok' && !sentReady) {
           sentReady = true;
           try {
@@ -2907,6 +2918,7 @@ function ensureLocalMaiaEngine() {
     worker.addEventListener('error', onLocalMaiaError);
     return worker;
   })().catch((err) => {
+    console.error('[CSE][Maia] local engine unavailable:', err);
     releaseLocalMaiaEngine();
     throw err;
   }).finally(() => {
@@ -3851,7 +3863,7 @@ function applySavedGuiAndModuleState() {
       generalNumbersFormat = saved.settings.generalNumbersFormat;
     }
     generalMinimizeToTray = saved.settings.generalMinimizeToTray !== false;
-    if (['aurora', 'blockforge', 'voidos'].includes(saved.settings.uiTheme)) uiTheme = saved.settings.uiTheme;
+    if (['aurora', 'blockforge', 'voidos', 'claude'].includes(saved.settings.uiTheme)) uiTheme = saved.settings.uiTheme;
     if (['emerald', 'cyan', 'violet', 'rose', 'gold'].includes(saved.settings.uiAccent)) uiAccent = saved.settings.uiAccent;
     if (['compact', 'comfortable', 'spacious'].includes(saved.settings.uiDensity)) uiDensity = saved.settings.uiDensity;
     uiMotionEnabled = saved.settings.uiMotionEnabled !== false;
@@ -3867,7 +3879,7 @@ function applySavedGuiAndModuleState() {
 }
 
 function applyUiTheme() {
-  const theme = ['aurora', 'blockforge', 'voidos'].includes(uiTheme) ? uiTheme : 'aurora';
+  const theme = ['aurora', 'blockforge', 'voidos', 'claude'].includes(uiTheme) ? uiTheme : 'aurora';
   const root = document.documentElement;
   root.dataset.cseTheme = theme;
   root.dataset.cseAccent = uiAccent;
@@ -4350,6 +4362,7 @@ function cseRenderGui() {
               <button class="cse-theme-card cse-theme-aurora ${uiTheme === 'aurora' ? 'is-selected' : ''}" data-ui-theme="aurora" type="button"><span class="cse-theme-mark">♞</span><strong>Maia Classic</strong><small>Original Maia Chess</small><span class="cse-theme-preview cse-preview-classic"><b></b><b></b><b></b></span><i>Modern · Emerald · Rounded</i></button>
               <button class="cse-theme-card cse-theme-blockforge ${uiTheme === 'blockforge' ? 'is-selected' : ''}" data-ui-theme="blockforge" type="button"><span class="cse-theme-mark cse-pixel-grass" aria-hidden="true"></span><strong>Blockcraft Classic</strong><small>Minecraft-style utility client</small><span class="cse-theme-preview cse-preview-blockcraft"><b></b><b></b><b></b><b></b><b></b></span><i>Pixel · Grass · Stone</i></button>
               <button class="cse-theme-card cse-theme-voidos ${uiTheme === 'voidos' ? 'is-selected' : ''}" data-ui-theme="voidos" type="button"><span class="cse-theme-mark cse-neon-chip" aria-hidden="true"></span><strong>Voidtech Neon</strong><small>Futuristic hack client</small><span class="cse-theme-preview cse-preview-voidtech"><b></b><b></b><b></b><b></b></span><i>Neon · Cyan · Angular HUD</i></button>
+              <button class="cse-theme-card cse-theme-claude ${uiTheme === 'claude' ? 'is-selected' : ''}" data-ui-theme="claude" type="button"><span class="cse-theme-mark cse-claude-mark">C</span><strong>Claude</strong><small>Warm minimal interface</small><span class="cse-theme-preview cse-preview-claude"><b></b><b></b><b></b><b></b></span><i>Ivory · Terracotta · Calm</i></button>
             </div>
             <div class="cse-ap-layout">
               <div class="cse-ap-controls">
@@ -4361,7 +4374,7 @@ function cseRenderGui() {
               <div class="cse-ap-preview">
                 <div class="cse-ap-preview-label">Live preview</div>
                 <section class="cse-ap-mini-window" aria-label="Theme preview">
-                  <header><span class="cse-ap-mini-logo">♞</span><b>${uiTheme === 'blockforge' ? 'BLOCKCRAFT' : uiTheme === 'voidos' ? 'VOIDTECH' : 'MAIA CHESS'}</b><i></i><i></i><i></i></header>
+                  <header><span class="cse-ap-mini-logo">${uiTheme === 'claude' ? 'C' : '♞'}</span><b>${uiTheme === 'blockforge' ? 'BLOCKCRAFT' : uiTheme === 'voidos' ? 'VOIDTECH' : uiTheme === 'claude' ? 'CLAUDE' : 'MAIA CHESS'}</b><i></i><i></i><i></i></header>
                   <main><aside><span></span><span></span><span></span><span></span></aside><article><strong>Appearance</strong><small>${uiDensity} · ${uiAccent}</small><em></em><em></em><button type="button">MODULE ACTIVE</button></article></main>
                 </section>
               </div>
@@ -4432,7 +4445,7 @@ function cseRenderGui() {
 
     grid.querySelectorAll('[data-ui-theme]').forEach(card => {
       card.addEventListener('click', () => {
-        uiTheme = ['aurora', 'blockforge', 'voidos'].includes(card.dataset.uiTheme) ? card.dataset.uiTheme : 'aurora';
+        uiTheme = ['aurora', 'blockforge', 'voidos', 'claude'].includes(card.dataset.uiTheme) ? card.dataset.uiTheme : 'aurora';
         applyUiTheme();
         cseSaveState();
         cseRenderGui();
@@ -4709,7 +4722,7 @@ function setAutomoveEnabled(enabled) {
     if (!isPuzzleRushEnabled) stopAutomoveUiTicker();
   } else {
     startAutomoveUiTicker();
-    if (automoveMode === 'legit') ensureLocalMaiaEngine().catch(() => {});
+    if (automoveMode === 'legit') ensureLocalMaiaEngine().catch(err => console.error('[CSE][Maia] prewarm failed:', err));
   }
   ensureEvalEngineState(true);
   if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
@@ -5015,7 +5028,7 @@ function cseRenderSettingsPanel(modId) {
         lastEvalMate = null;
         cseSaveState();
         updateAutomoveModeUI();
-        if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(() => {});
+        if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(err => console.error('[CSE][Maia] prewarm failed:', err));
         ensureEvalEngineState(true);
       });
     });
@@ -5571,7 +5584,7 @@ if (isAutomoveEnabled || isPuzzleRushEnabled) startAutomoveUiTicker();
 if (isAutoPlayEnabled) startAutoPlayTicker();
 if (isToxicChatEnabled) startToxicChatTicker();
 syncGuiHudPanel();
-if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(() => {});
+if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(err => console.error('[CSE][Maia] prewarm failed:', err));
 ensureEvalEngineState(true);
 cseSaveState();
 window.CSEStatsCheater?.scanAndInject?.();
