@@ -49,7 +49,7 @@ let maiaElo = 1500;
 let generalLanguage = 'en'; // 'en' | 'it'
 let generalNumbersFormat = 'default'; // 'default' | 'eu'
 let generalMinimizeToTray = true;
-let uiTheme = 'aurora'; // 'aurora' | 'blockforge' | 'voidos' | 'claude'
+let uiTheme = 'aurora'; // 'aurora' | 'blockforge' | 'voidos' | 'claude' | 'verdant'
 let uiAccent = 'emerald'; // 'emerald' | 'cyan' | 'violet' | 'rose' | 'gold'
 let uiDensity = 'comfortable'; // 'compact' | 'comfortable' | 'spacious'
 let uiMotionEnabled = true;
@@ -3891,7 +3891,7 @@ function applySavedGuiAndModuleState() {
       generalNumbersFormat = saved.settings.generalNumbersFormat;
     }
     generalMinimizeToTray = saved.settings.generalMinimizeToTray !== false;
-    if (['aurora', 'blockforge', 'voidos', 'claude'].includes(saved.settings.uiTheme)) uiTheme = saved.settings.uiTheme;
+    if (['aurora', 'blockforge', 'voidos', 'claude', 'verdant'].includes(saved.settings.uiTheme)) uiTheme = saved.settings.uiTheme;
     if (['emerald', 'cyan', 'violet', 'rose', 'gold'].includes(saved.settings.uiAccent)) uiAccent = saved.settings.uiAccent;
     if (['compact', 'comfortable', 'spacious'].includes(saved.settings.uiDensity)) uiDensity = saved.settings.uiDensity;
     uiMotionEnabled = saved.settings.uiMotionEnabled !== false;
@@ -3907,7 +3907,7 @@ function applySavedGuiAndModuleState() {
 }
 
 function applyUiTheme() {
-  const theme = ['aurora', 'blockforge', 'voidos', 'claude'].includes(uiTheme) ? uiTheme : 'aurora';
+  const theme = ['aurora', 'blockforge', 'voidos', 'claude', 'verdant'].includes(uiTheme) ? uiTheme : 'aurora';
   const root = document.documentElement;
   root.dataset.cseTheme = theme;
   root.dataset.cseAccent = uiAccent;
@@ -4391,6 +4391,7 @@ function cseRenderGui() {
               <button class="cse-theme-card cse-theme-blockforge ${uiTheme === 'blockforge' ? 'is-selected' : ''}" data-ui-theme="blockforge" type="button"><span class="cse-theme-mark cse-pixel-grass" aria-hidden="true"></span><strong>Blockcraft Classic</strong><small>Minecraft-style utility client</small><span class="cse-theme-preview cse-preview-blockcraft"><b></b><b></b><b></b><b></b><b></b></span><i>Pixel · Grass · Stone</i></button>
               <button class="cse-theme-card cse-theme-voidos ${uiTheme === 'voidos' ? 'is-selected' : ''}" data-ui-theme="voidos" type="button"><span class="cse-theme-mark cse-neon-chip" aria-hidden="true"></span><strong>Voidtech Neon</strong><small>Futuristic hack client</small><span class="cse-theme-preview cse-preview-voidtech"><b></b><b></b><b></b><b></b></span><i>Neon · Cyan · Angular HUD</i></button>
               <button class="cse-theme-card cse-theme-claude ${uiTheme === 'claude' ? 'is-selected' : ''}" data-ui-theme="claude" type="button"><span class="cse-theme-mark cse-claude-mark">C</span><strong>Claude</strong><small>Warm minimal interface</small><span class="cse-theme-preview cse-preview-claude"><b></b><b></b><b></b><b></b></span><i>Ivory · Terracotta · Calm</i></button>
+              <button class="cse-theme-card cse-theme-verdant ${uiTheme === 'verdant' ? 'is-selected' : ''}" data-ui-theme="verdant" type="button"><span class="cse-theme-mark cse-verdant-mark">V</span><strong>Verdant</strong><small>Compact dark client</small><span class="cse-theme-preview cse-preview-verdant"><b></b><b></b><b></b><b></b></span><i>Obsidian · Mint · Focused</i></button>
             </div>
             <div class="cse-ap-layout">
               <div class="cse-ap-controls">
@@ -4402,7 +4403,7 @@ function cseRenderGui() {
               <div class="cse-ap-preview">
                 <div class="cse-ap-preview-label">Live preview</div>
                 <section class="cse-ap-mini-window" aria-label="Theme preview">
-                  <header><span class="cse-ap-mini-logo">${uiTheme === 'claude' ? 'C' : '♞'}</span><b>${uiTheme === 'blockforge' ? 'BLOCKCRAFT' : uiTheme === 'voidos' ? 'VOIDTECH' : uiTheme === 'claude' ? 'CLAUDE' : 'MAIA CHESS'}</b><i></i><i></i><i></i></header>
+                  <header><span class="cse-ap-mini-logo">${uiTheme === 'claude' ? 'C' : uiTheme === 'verdant' ? 'V' : '♞'}</span><b>${uiTheme === 'blockforge' ? 'BLOCKCRAFT' : uiTheme === 'voidos' ? 'VOIDTECH' : uiTheme === 'claude' ? 'CLAUDE' : uiTheme === 'verdant' ? 'VERDANT' : 'MAIA CHESS'}</b><i></i><i></i><i></i></header>
                   <main><aside><span></span><span></span><span></span><span></span></aside><article><strong>Appearance</strong><small>${uiDensity} · ${uiAccent}</small><em></em><em></em><button type="button">MODULE ACTIVE</button></article></main>
                 </section>
               </div>
@@ -4473,7 +4474,7 @@ function cseRenderGui() {
 
     grid.querySelectorAll('[data-ui-theme]').forEach(card => {
       card.addEventListener('click', () => {
-        uiTheme = ['aurora', 'blockforge', 'voidos', 'claude'].includes(card.dataset.uiTheme) ? card.dataset.uiTheme : 'aurora';
+        uiTheme = ['aurora', 'blockforge', 'voidos', 'claude', 'verdant'].includes(card.dataset.uiTheme) ? card.dataset.uiTheme : 'aurora';
         applyUiTheme();
         cseSaveState();
         cseRenderGui();
@@ -4697,11 +4698,21 @@ function cseRenderGui() {
     });
 
     const dots = card.querySelector('.cse-mc-dots');
+    const openModuleSettings = () => {
+      cseGuiState.openSettings = mod.id;
+      card.classList.add('cse-mc-card-context-open');
+      cseRenderSettingsPanel(mod.id);
+    };
     if (mod.hasSettings && dots) {
       dots.addEventListener('click', e => {
         e.stopPropagation();
-        cseGuiState.openSettings = mod.id;
-        cseRenderSettingsPanel(mod.id);
+        openModuleSettings();
+      });
+      card.title = 'Right-click for ' + mod.label + ' settings';
+      card.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        openModuleSettings();
       });
     }
 
