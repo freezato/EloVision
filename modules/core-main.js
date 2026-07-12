@@ -2555,6 +2555,25 @@ function getMaiaWeightsPath(elo = maiaElo) {
   return `${MAIA_LOCAL_WEIGHTS_DIR}/maia-${normalizeMaiaElo(elo)}.pb.gz`;
 }
 
+function normalizeLocalMaiaBestMove(move, fen) {
+  const uci = extractUciMove(move);
+  if (!uci || typeof fen !== 'string') return uci;
+
+  // Zerofish runs with UCI_Chess960 enabled and therefore represents a
+  // standard castle as king-to-rook (e1h1/e1a1, e8h8/e8a8). Chess.com and
+  // the automove layer expect the king destination square instead.
+  const castlingRights = fen.trim().split(/\s+/)[2] || '-';
+  const castles = {
+    e1h1: ['K', 'e1g1'],
+    e1a1: ['Q', 'e1c1'],
+    e8h8: ['k', 'e8g8'],
+    e8a8: ['q', 'e8c8'],
+  };
+  const castle = castles[uci];
+  if (castle && castlingRights.includes(castle[0])) return castle[1];
+  return uci;
+}
+
 function getActiveEvalEngineId() {
   if (isPuzzleContext() && isPuzzleRushEnabled) return 'stockfish';
   if (isAutomoveEnabled && !isPuzzleContext() && automoveMode === 'legit') return 'maia';
@@ -2909,7 +2928,7 @@ function onLocalMaiaMessage(event) {
   }
 
   if (line.startsWith('bestmove ')) {
-    const bestMove = extractUciMove(line);
+    const bestMove = normalizeLocalMaiaBestMove(line, search.fen);
     if (bestMove && !isMoveConsistentWithFen(bestMove, search.fen)) {
       console.error('[CSE][Maia] engine returned a move for the wrong position', {
         searchId: search.id,

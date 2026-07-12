@@ -482,6 +482,26 @@ test('Maia accepts only the bestmove carrying the active searchId', async () => 
   }
 });
 
+test('Maia converts Zerofish Chess960 castling notation for a standard game', async () => {
+  const harness = loadCoreMaia();
+  await harness.api.ensureLocalMaiaEngine();
+  const pending = harness.api.runLocalMaiaEval(
+    'r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1',
+    1,
+    null,
+  );
+  await flushMicrotasks();
+  const searchId = harness.api.currentSearch().id;
+
+  emitCoreWorkerLine(harness.ports.at(-1), 'bestmove e1h1', searchId);
+  const result = await pending;
+  try {
+    assert.equal(result?.bestMove, 'e1g1');
+  } finally {
+    harness.api.releaseLocalMaiaEngine();
+  }
+});
+
 test('a Maia search timeout hard-resets the engine before the next search', async () => {
   const harness = loadCoreMaia();
   await harness.api.ensureLocalMaiaEngine();
