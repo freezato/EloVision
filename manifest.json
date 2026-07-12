@@ -3,7 +3,10 @@
   "name": "Chess.com Opponent Stats",
   "version": "1.0.0",
   "description": "Mostra le statistiche dell'avversario su chess.com: win/lose in 1, 7, 30 giorni, WLR e peak ELO.",
-  "permissions": ["activeTab", "storage"],
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
   "host_permissions": [
     "https://www.chess.com/*",
     "https://api.chess.com/*",
@@ -14,7 +17,9 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.chess.com/*"],
+      "matches": [
+        "https://www.chess.com/*"
+      ],
       "js": [
         "modules/stats-cheater.js",
         "modules/game-insights.js",
@@ -24,19 +29,36 @@
         "modules/tools-gui.js",
         "content.js"
       ],
-      "css": ["styles.css"],
+      "css": [
+        "styles.css"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["modules/stockfish/*", "modules/maia/*", "modules/maia/weights/*"],
-      "matches": ["https://www.chess.com/*"]
+      "resources": [
+        "modules/stockfish/*",
+        "modules/maia/*",
+        "modules/maia/weights/*"
+      ],
+      "matches": [
+        "https://www.chess.com/*"
+      ]
     }
   ],
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
     "128": "icon128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
   }
 }
