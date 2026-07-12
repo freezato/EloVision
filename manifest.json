@@ -5,7 +5,8 @@
   "description": "Mostra le statistiche dell'avversario su chess.com: win/lose in 1, 7, 30 giorni, WLR e peak ELO.",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "offscreen"
   ],
   "host_permissions": [
     "https://www.chess.com/*",
