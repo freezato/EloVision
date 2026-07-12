@@ -61,3 +61,57 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+
+
+const cseMaiaClients = new Map();
+let cseMaiaOffscreenPort = null;
+let cseMaiaClientSeq = 0;
+const cseMaiaQueue = [];
+
+async function cseEnsureMaiaOffscreen() {
+  if (!chrome.offscreen) throw new Error('chrome.offscreen API unavailable');
+  const exists = await chrome.offscreen.hasDocument();
+  if (!exists) {
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['WORKERS'],
+      justification: 'Run the bundled local Maia LC0 WebAssembly engine.',
+    });
+  }
+}
+
+function cseForwardMaia(payload) {
+  if (cseMaiaOffscreenPort) cseMaiaOffscreenPort.postMessage(payload);
+  else cseMaiaQueue.push(payload);
+}
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name === 'cse-maia-offscreen') {
+    cseMaiaOffscreenPort = port;
+    while (cseMaiaQueue.length) port.postMessage(cseMaiaQueue.shift());
+    port.onMessage.addListener(payload => {
+      const client = cseMaiaClients.get(payload?.clientId);
+      if (client) client.postMessage(payload.message);
+    });
+    port.onDisconnect.addListener(() => {
+      cseMaiaOffscreenPort = null;
+      for (const client of cseMaiaClients.values()) {
+        try { client.postMessage({ type: 'error', message: 'Maia offscreen engine disconnected' }); } catch {}
+      }
+    });
+    return;
+  }
+  if (port.name !== 'cse-maia-client') return;
+
+  const clientId = 'maia-' + (++cseMaiaClientSeq);
+  cseMaiaClients.set(clientId, port);
+  cseEnsureMaiaOffscreen().catch(error => {
+    try { port.postMessage({ type: 'error', message: error?.message || String(error) }); } catch {}
+  });
+
+  port.onMessage.addListener(message => cseForwardMaia({ clientId, message }));
+  port.onDisconnect.addListener(() => {
+    cseMaiaClients.delete(clientId);
+    cseForwardMaia({ clientId, message: { type: 'terminate' } });
+  });
+});
