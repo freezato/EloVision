@@ -75,7 +75,7 @@ let arrowsEnabled = true; // Toggle per le frecce
 let isEvalBarEnabled = false;
 let isGuiHudEnabled = false;
 let guiHudPanel = null;
-let automoveMode = 'blatant'; // 'blatant' | 'legit'
+let automoveMode = 'blatant'; // 'blatant' | 'legit' | 'human'
 let automoveDelayMin = 1;  // seconds (user configurable)
 let automoveDelayMax = 5;  // seconds (user configurable)
 let automoveFastWhenLowTime = false; // speed up when own clock < 30s
@@ -117,6 +117,7 @@ const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
 const MAIA_LOCAL_BOOT_TIMEOUT_MS = 30000;
 const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 1800;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
+const AUTOMOVE_MODES = ['legit', 'blatant', 'human'];
 
 function cseReadState() {
   try {
@@ -559,6 +560,10 @@ let automoveDelayMs = 0;
 let automovePlannedMove = null;
 let automoveTargetFen = null;
 let automoveScheduledProfile = null; // 'automove' | 'puzzleRush'
+let automovePlannedMeta = null;
+let automovePositionKey = null;
+let automovePositionStartedAt = 0;
+let automoveLastExecutionMs = null;
 let automoveBlockedKey = null;
 let automoveBlockedUntil = 0;
 let premoveTimeout = null;
@@ -573,6 +578,7 @@ let autoPlayTimeout = null;
 let autoPlayScheduledAt = 0;
 let autoPlayDelayMs = 0;
 let autoPlayHandledToken = null;
+let autoPlayHandledAt = 0;
 let autoPlayAcceptRematch = true;
 let autoPlayGameOverToken = null;
 let autoPlayGameOverSeenAt = 0;
@@ -587,6 +593,16 @@ let cseLogRenderQueued = false;
 let lastLoggedPlayerSide = null;
 let playerSideCache = { side: null, ts: 0 };
 let legitInaccuracyStreak = 0;
+let humanGameState = {
+  token: null,
+  lastPly: null,
+  positionKey: null,
+  positionStartedAt: 0,
+  selectedMove: null,
+  selectedMeta: null,
+  previousSuboptimal: false,
+  engineDeadlineJitter: 1,
+};
 
 function isSameFenBoardAndTurn(fenA, fenB) {
   if (!fenA || !fenB) return true;
@@ -1000,6 +1016,7 @@ function clearAutoPlaySchedule(resetHandledToken = false) {
   autoPlayDelayMs = 0;
   if (resetHandledToken) {
     autoPlayHandledToken = null;
+    autoPlayHandledAt = 0;
     autoPlayGameOverToken = null;
     autoPlayGameOverSeenAt = 0;
     autoPlayGameOverNode = null;
@@ -1032,12 +1049,13 @@ function escapeHtmlAttr(text) {
 function scoreAutoPlayActionText(text) {
   const t = normalizeActionText(text);
   if (!t) return 0;
-  if (/\b(play again|rematch|rivincita|gioca ancora)\b/.test(t)) return autoPlayAcceptRematch ? 120 : 0;
-  if (/\b(accept rematch|accetta rivincita)\b/.test(t)) return autoPlayAcceptRematch ? 130 : 0;
-  if (/\b(new game|new match|start new)\b/.test(t)) return 110;
-  if (/\b(nuova partita|nuova sfida)\b/.test(t)) return 108;
-  if (/\bnew\b/.test(t) && /\b(min|sec|second|rapid|blitz|bullet|daily)\b/.test(t)) return 90;
-  if (/\bplay\b/.test(t) && /\bnew\b/.test(t)) return 85;
+  if (/\b(accept rematch|accetta rivincita)\b/.test(t)) return autoPlayAcceptRematch ? 140 : 0;
+  if (/\b(new game|new match|start new)\b/.test(t)) return 135;
+  if (/\b(nuova partita|nuova sfida)\b/.test(t)) return 133;
+  if (/\bnew\b/.test(t) && /\b(min|sec|second|rapid|blitz|bullet|daily)\b/.test(t)) return 130;
+  if (/\b(play again|gioca ancora)\b/.test(t)) return 125;
+  if (/\b(rematch|rivincita)\b/.test(t)) return autoPlayAcceptRematch ? 110 : 0;
+  if (/\bplay\b/.test(t) && /\bnew\b/.test(t)) return 120;
   return 0;
 }
 
@@ -1099,6 +1117,11 @@ function performAutoPlayTick() {
     updateAutomoveButtonState();
     return;
   }
+  if (!isGameOverVisible()) {
+    clearAutoPlaySchedule(true);
+    updateAutomoveButtonState();
+    return;
+  }
 
   const action = getAutoPlayAction();
   if (!action) {
@@ -1107,11 +1130,15 @@ function performAutoPlayTick() {
     return;
   }
 
-  if (autoPlayHandledToken === action.token) return;
+  if (autoPlayHandledToken === action.onceToken) {
+    if (autoPlayHandledAt && now() - autoPlayHandledAt < 5000) return;
+    autoPlayHandledToken = null;
+    autoPlayHandledAt = 0;
+  }
   if (autoPlayTimeout) return;
 
   const gameOverToken = `${location.pathname}|${action.text}`;
-  if (autoPlayGameOverToken !== gameOverToken || autoPlayGameOverNode !== action.node) {
+  if (autoPlayGameOverToken !== gameOverToken) {
     autoPlayGameOverToken = gameOverToken;
     autoPlayGameOverNode = action.node;
     autoPlayGameOverSeenAt = now();
@@ -1148,6 +1175,7 @@ function performAutoPlayTick() {
       live.node.click();
       // Mark this end-screen action as already sent, so rematch is sent only once.
       autoPlayHandledToken = live.onceToken;
+      autoPlayHandledAt = now();
       autoPlayLog('clicked', { text: live.text });
     } catch (err) {
       autoPlayLog('click failed', err);
@@ -1313,8 +1341,84 @@ function isComputerGameContext() {
   );
 }
 
+function isHumanAutomoveAllowedContext() {
+  return automoveMode === 'human' && (isOnlineGameContext() || isComputerGameContext());
+}
+
+function isHumanAutomoveActive() {
+  return isAutomoveEnabled && !isPuzzleContext() && automoveMode === 'human';
+}
+
+function getNextAutomoveMode(mode) {
+  const index = AUTOMOVE_MODES.indexOf(mode);
+  return AUTOMOVE_MODES[(index + 1 + AUTOMOVE_MODES.length) % AUTOMOVE_MODES.length];
+}
+
+function getHumanGameToken() {
+  if (!getBoardElement()) return null;
+  return String(location.pathname || '');
+}
+
+function resetHumanGameState(token = null) {
+  humanGameState = {
+    token,
+    lastPly: null,
+    positionKey: null,
+    positionStartedAt: 0,
+    selectedMove: null,
+    selectedMeta: null,
+    previousSuboptimal: false,
+    engineDeadlineJitter: 1,
+  };
+}
+
+function syncHumanPositionState(fen) {
+  const token = getHumanGameToken();
+  const positionKey = getFenBoardAndTurn(fen);
+  const ply = getReliablePlyCount();
+  const gameChanged = humanGameState.token !== token || (
+    Number.isInteger(ply) && Number.isInteger(humanGameState.lastPly) && ply < humanGameState.lastPly
+  );
+  if (gameChanged) resetHumanGameState(token);
+  if (Number.isInteger(ply)) humanGameState.lastPly = ply;
+  if (positionKey && humanGameState.positionKey !== positionKey) {
+    humanGameState.positionKey = positionKey;
+    humanGameState.positionStartedAt = now();
+    humanGameState.selectedMove = null;
+    humanGameState.selectedMeta = null;
+    humanGameState.engineDeadlineJitter = 0.85 + (Math.random() * 0.30);
+    automoveLog('human position appeared', { mode: 'human', fen: positionKey, token });
+  }
+  return humanGameState;
+}
+
+function countFenPieces(fen) {
+  const board = expandFenBoard(String(fen || '').trim().split(/\s+/)[0] || '');
+  if (!board) return null;
+  return board.reduce((total, row) => total + row.filter(Boolean).length, 0);
+}
+
+function buildHumanPositionAnalysis(fen, pvLines, side) {
+  const api = window.CSEHumanAutomove;
+  if (!api) return { complexity: 0.5, gapCp: null, validAlternatives: 1 };
+  const lines = Array.isArray(pvLines) ? pvLines.slice(0, STOCKFISH_LOCAL_MULTI_PV) : [];
+  const captureCount = lines.filter(line => isCaptureMoveOnFen(line?.moves?.[0], fen)).length;
+  const parts = String(fen || '').trim().split(/\s+/);
+  const board = expandFenBoard(parts[0] || '');
+  const pseudoLegalCount = board && side ? countLegalMovesForColor(board, side) : null;
+  return api.calculateHumanComplexity({
+    pvLines: lines,
+    side,
+    fullmove: getReliableFullmoveNumber(),
+    pieceCount: countFenPieces(fen),
+    captureCount,
+    pseudoLegalCount,
+  });
+}
+
 function getActiveMoveAssistProfile() {
   if (isPuzzleContext()) return isPuzzleRushEnabled ? 'puzzleRush' : null;
+  if (automoveMode === 'human') return isHumanAutomoveAllowedContext() && isAutomoveEnabled ? 'automove' : null;
   if (isOnlineGameContext() || isComputerGameContext()) return isAutomoveEnabled ? 'automove' : null;
   return null;
 }
@@ -1431,12 +1535,46 @@ function chooseLegitAutomoveMove(pool, fallback, playerSide, pvLines, ownClockSe
   return chosen;
 }
 
+function chooseHumanAutomoveMove(pool, fallback, playerSide, pvLines) {
+  const api = window.CSEHumanAutomove;
+  if (!api || !lastEvalFen || !playerSide) return fallback;
+  const state = syncHumanPositionState(lastEvalFen);
+  if (state.selectedMove && pool.includes(state.selectedMove)) return state.selectedMove;
+
+  const analysis = buildHumanPositionAnalysis(lastEvalFen, pvLines, playerSide);
+  const choice = api.chooseHumanMove({
+    moves: pool,
+    pvLines,
+    side: playerSide,
+    complexity: analysis.complexity,
+    previousSuboptimal: state.previousSuboptimal,
+  });
+  const selected = choice?.move && pool.includes(choice.move) ? choice.move : fallback;
+  state.selectedMove = selected;
+  state.selectedMeta = { ...choice, complexity: analysis.complexity, analysis };
+  automoveLog('human move selected', {
+    mode: 'human',
+    complexity: Number(analysis.complexity.toFixed(3)),
+    move: selected,
+    lossCp: choice?.lossCp ?? null,
+    reason: choice?.reason || 'fallback',
+    alternatives: analysis.validAlternatives,
+    gapCp: analysis.gapCp,
+  });
+  return selected;
+}
+
+function commitHumanMoveState(meta) {
+  if (automoveMode !== 'human' || !meta) return;
+  humanGameState.previousSuboptimal = !!meta.suboptimal;
+}
+
 function getAutomoveCandidateMove(profile = 'automove') {
   if (!lastEvalMoveSourceFen || !lastEvalFen || !isSameFenBoardAndTurn(lastEvalMoveSourceFen, lastEvalFen)) return null;
   const fallbackRaw = extractUciMove(currentBestMove);
   const fallback = isMovePlayableNow(fallbackRaw, lastEvalFen) ? fallbackRaw : null;
   if (profile === 'puzzleRush') return fallback;
-  if (automoveMode !== 'legit') {
+  if (automoveMode !== 'legit' && automoveMode !== 'human') {
     return fallback;
   }
 
@@ -1453,6 +1591,10 @@ function getAutomoveCandidateMove(profile = 'automove') {
     ? getOwnClockSecondsRemaining(boardEl, playerSide, fenTurn)
     : null;
   const fullmove = getReliableFullmoveNumber();
+
+  if (automoveMode === 'human') {
+    return chooseHumanAutomoveMove(pool, fallback, playerSide || fenTurn, lastEvalPvLines);
+  }
 
   return chooseLegitAutomoveMove(pool, fallback, playerSide, lastEvalPvLines, ownClockSec, fullmove);
 }
@@ -1492,6 +1634,10 @@ function clearPremoveSchedule() {
   premoveDelayMs = 0;
   premovePlannedMove = null;
   premoveTargetFen = null;
+}
+
+function isSmartPremoveEnabledForCurrentMode() {
+  return automoveMode === 'human' || (automoveMode === 'legit' && automoveUseSmartPremoves);
 }
 
 function buildPremovePlanFromPv(fen, pvMoves, playerSide) {
@@ -1534,7 +1680,8 @@ function buildPremovePlanFromPv(fen, pvMoves, playerSide) {
 
 // â”€â”€ Premove intelligenti solo su risposte forzate â”€â”€
 function getSmartPremoveCandidate(playerSide) {
-  if (!automoveUseSmartPremoves || automoveMode !== 'legit') return null;
+  if (!isSmartPremoveEnabledForCurrentMode()) return null;
+  if (automoveMode === 'human' && !isHumanAutomoveAllowedContext()) return null;
   if (!lastEvalMoveSourceFen || !lastEvalFen || !isSameFenBoardAndTurn(lastEvalMoveSourceFen, lastEvalFen)) return null;
   if (!Array.isArray(lastEvalPvLines) || !lastEvalPvLines.length) return null;
 
@@ -1546,7 +1693,6 @@ function getSmartPremoveCandidate(playerSide) {
   const mainLine = lineCandidates[0];
   const plan = buildPremovePlanFromPv(lastEvalFen, mainLine.moves, playerSide);
   if (!plan) return null;
-  if (!plan.isRecapture) return null;
 
   const opponentMove = extractUciMove(plan.opponentMove);
   if (!opponentMove) return null;
@@ -1560,12 +1706,35 @@ function getSmartPremoveCandidate(playerSide) {
 
   // Conta le possibili mosse del nostro colore
   const legalReplies = countLegalMovesForColor(afterBoard.board, playerSide);
-  // Evita premove aggressivi: consenti solo in casi molto ovvi (ricattura con poche alternative).
-  if (legalReplies < 1 || legalReplies > 2) return null;
+  if (legalReplies < 1) return null;
+
+  const rootSide = normalizeTurn(parts[1]);
+  const scoreLine = window.CSEHumanAutomove?.lineScoreForSide;
+  const scoredLines = typeof scoreLine === 'function'
+    ? lineCandidates.map(line => ({ line, score: scoreLine(line, rootSide) })).filter(item => Number.isFinite(item.score))
+    : [];
+  const bestScore = scoredLines[0]?.score;
+  const secondScore = scoredLines[1]?.score;
+  const opponentMoveDominant = Number.isFinite(bestScore) &&
+    Number.isFinite(secondScore) &&
+    bestScore - secondScore >= 160;
+  const plausibleLines = Number.isFinite(bestScore)
+    ? scoredLines.filter(item => bestScore - item.score <= 120).map(item => item.line)
+    : [mainLine];
+  const plausibleReplies = plausibleLines.map(line => extractUciMove(line?.moves?.[1])).filter(Boolean);
+  const premoveDecision = window.CSEHumanAutomove?.classifyForcedPremove({
+    isRecapture: plan.isRecapture,
+    opponentGapCp: opponentMoveDominant && Number.isFinite(bestScore) && Number.isFinite(secondScore)
+      ? bestScore - secondScore
+      : (opponentMoveDominant ? 100000 : 0),
+    plausibleReplies,
+    pseudoLegalCount: legalReplies,
+  });
+  if (!premoveDecision?.allowed) return null;
 
   return {
     move: plan.replyMove,
-    reason: 'obvious-recapture',
+    reason: premoveDecision.reason,
     opponentMove: plan.opponentMove,
     isCapture: plan.isReplyCapture,
   };
@@ -1594,7 +1763,14 @@ function scheduleSmartPremove(move, targetFen, meta = {}) {
 
   premoveTimeout = setTimeout(() => {
     premoveTimeout = null;
-    if (!isAutomoveEnabled || !automoveUseSmartPremoves || automoveMode !== 'legit') return;
+    if (!isAutomoveEnabled || !isSmartPremoveEnabledForCurrentMode()) {
+      clearPremoveSchedule();
+      return;
+    }
+    if (automoveMode === 'human' && !isHumanAutomoveAllowedContext()) {
+      clearPremoveSchedule();
+      return;
+    }
 
     const boardEl = getBoardElement();
     if (!boardEl) return;
@@ -1605,8 +1781,16 @@ function scheduleSmartPremove(move, targetFen, meta = {}) {
     const liveFen = getFenFromPage();
     if (!isSameFenBoardAndTurn(liveFen, premoveTargetFen)) return;
 
+    const revalidated = getSmartPremoveCandidate(side);
+    if (!revalidated || revalidated.move !== premovePlannedMove || revalidated.opponentMove !== meta.opponentMove) {
+      automoveLog('premove rejected at fire time', { mode: automoveMode, reason: 'context-or-legality-changed' });
+      clearPremoveSchedule();
+      return;
+    }
+
     const sent = executeAutomoveMove(premovePlannedMove);
     automoveLog('premove dispatched', {
+      mode: automoveMode,
       move: premovePlannedMove,
       sent,
       delayMs: premoveDelayMs,
@@ -1679,6 +1863,27 @@ function computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, profile = '
   minSec = Math.max(0, minSec);
   maxSec = Math.max(minSec, maxSec);
   return { minSec, maxSec, reasons, ownClockSec };
+}
+
+function computeHumanAutomoveTiming(boardEl, playerSide, turn) {
+  const api = window.CSEHumanAutomove;
+  const ownClockSec = getOwnClockSecondsRemaining(boardEl, playerSide, turn);
+  const state = syncHumanPositionState(lastEvalFen);
+  const analysis = state.selectedMeta?.analysis || buildHumanPositionAnalysis(lastEvalFen, lastEvalPvLines, playerSide || turn);
+  const timing = api?.computeHumanThinkBudget({
+    clockSec: ownClockSec,
+    complexity: analysis.complexity,
+    fullmove: getReliableFullmoveNumber(),
+    pieceCount: countFenPieces(lastEvalFen),
+  }) || { budgetSec: 0.3, band: 'fallback', reserveSec: null, movesRemaining: null };
+  const engineElapsedSec = state.positionStartedAt ? Math.max(0, (now() - state.positionStartedAt) / 1000) : 0;
+  return {
+    ...timing,
+    ownClockSec,
+    complexity: analysis.complexity,
+    engineElapsedSec,
+    remainingDelaySec: api?.getRemainingDelaySeconds(timing.budgetSec, engineElapsedSec) ?? Math.max(0, timing.budgetSec - engineElapsedSec),
+  };
 }
 
 function isGameOverVisible() {
@@ -1811,7 +2016,63 @@ function stopToxicChatTicker() {
 }
 
 function updateAutomoveModeUI() {
-  if (toolsModal?.isConnected) cseRenderGui();
+  if (!toolsModal?.isConnected) return;
+  cseRenderGui();
+  if (uiTheme !== 'verdant' && cseGuiState.openSettings === 'AutoMove') {
+    cseRenderSettingsPanel('AutoMove');
+  }
+}
+
+function getAutomoveModeLabel(mode = automoveMode) {
+  return mode === 'human' ? 'Human' : mode === 'legit' ? 'Legit' : 'Blatant';
+}
+
+function resetAutomoveTimingState(clearLast = false) {
+  automovePositionKey = null;
+  automovePositionStartedAt = 0;
+  if (clearLast) automoveLastExecutionMs = null;
+}
+
+function trackAutomoveTurnStart(fen, playerSide = null, turn = null) {
+  if (!isAutomoveEnabled || !fen) return false;
+  const normalizedTurn = turn || normalizeTurn(String(fen).split(/\s+/)[1] || '');
+  if (playerSide && normalizedTurn && playerSide !== normalizedTurn) {
+    resetAutomoveTimingState(false);
+    return false;
+  }
+  const key = getFenBoardAndTurn(fen);
+  if (!key) return false;
+  if (automovePositionKey !== key) {
+    automovePositionKey = key;
+    const humanStartedAt = automoveMode === 'human' && humanGameState.positionKey === key
+      ? humanGameState.positionStartedAt
+      : 0;
+    automovePositionStartedAt = humanStartedAt || now();
+  }
+  return true;
+}
+
+function finishAutomoveTiming(fen) {
+  const key = getFenBoardAndTurn(fen);
+  if (!automovePositionStartedAt || (key && automovePositionKey && key !== automovePositionKey)) return null;
+  automoveLastExecutionMs = Math.max(0, now() - automovePositionStartedAt);
+  automovePositionKey = null;
+  automovePositionStartedAt = 0;
+  return automoveLastExecutionMs;
+}
+
+function getAutomoveTimingText() {
+  if (automovePositionStartedAt) {
+    const elapsedSec = Math.max(0, now() - automovePositionStartedAt) / 1000;
+    if (automoveScheduledProfile === 'automove' && automoveScheduledAt) {
+      const remainingSec = Math.max(0, automoveDelayMs - (now() - automoveScheduledAt)) / 1000;
+      return `${elapsedSec.toFixed(1)}s · ETA ${remainingSec.toFixed(1)}s`;
+    }
+    return `${elapsedSec.toFixed(1)}s`;
+  }
+  return Number.isFinite(automoveLastExecutionMs)
+    ? `last ${(automoveLastExecutionMs / 1000).toFixed(1)}s`
+    : (isAutomoveEnabled ? '0.0s' : '');
 }
 
 function clearAutomoveSchedule(clearTimer = true) {
@@ -1824,6 +2085,7 @@ function clearAutomoveSchedule(clearTimer = true) {
   automovePlannedMove = null;
   automoveTargetFen = null;
   automoveScheduledProfile = null;
+  automovePlannedMeta = null;
   if (clearTimer) {
     const timerAuto = document.getElementById('cse-mc-timer-automove');
     const timerPuzzle = document.getElementById('cse-mc-timer-puzzlerush');
@@ -1837,15 +2099,16 @@ function updateAutomoveButtonState() {
   const puzzleTimerEl = document.getElementById('cse-mc-timer-puzzlerush');
   const autoPlayTimerEl = document.getElementById('cse-mc-timer-autoplay');
   const hasActiveTimer = !!(automoveScheduledAt && automoveDelayMs > 0 && automoveScheduledProfile);
-  const timerText = hasActiveTimer
+  const timerText = automoveScheduledProfile === 'puzzleRush' && hasActiveTimer
     ? ('ETA ' + (Math.max(0, automoveDelayMs - (now() - automoveScheduledAt)) / 1000).toFixed(1) + 's')
     : '';
+  const automoveTimingText = getAutomoveTimingText();
   const hasAutoPlayTimer = !!(autoPlayScheduledAt && autoPlayDelayMs > 0);
   const autoPlayTimerText = hasAutoPlayTimer
     ? ('ETA ' + (Math.max(0, autoPlayDelayMs - (now() - autoPlayScheduledAt)) / 1000).toFixed(1) + 's')
     : '';
 
-  if (autoTimerEl) autoTimerEl.textContent = automoveScheduledProfile === 'automove' ? timerText : '';
+  if (autoTimerEl) autoTimerEl.textContent = automoveTimingText;
   if (puzzleTimerEl) puzzleTimerEl.textContent = automoveScheduledProfile === 'puzzleRush' ? timerText : '';
   if (autoPlayTimerEl) autoPlayTimerEl.textContent = autoPlayTimerText;
   if (isGuiHudEnabled) syncGuiHudPanel();
@@ -1957,6 +2220,9 @@ async function performAutomove() {
   const detectedTurn = detectSideToMove();
   const fenTurn = normalizeTurn((lastEvalFen || '').split(' ')[1]);
   const turn = detectedTurn || fenTurn;
+  if (playerSide && turn && playerSide === turn) {
+    trackAutomoveTurnStart(lastEvalFen, playerSide, turn);
+  }
 
   // Optional smart premove logic: only in online AutoMove + legit mode.
   if (
@@ -1966,7 +2232,7 @@ async function performAutomove() {
     playerSide !== turn
   ) {
     clearAutomoveSchedule();
-    if (!automoveUseSmartPremoves || automoveMode !== 'legit') {
+    if (!isSmartPremoveEnabledForCurrentMode()) {
       clearPremoveSchedule();
       return;
     }
@@ -2068,14 +2334,22 @@ async function performAutomove() {
   automovePlannedMove = bestMove;
   automoveTargetFen = lastEvalFen;
   automoveScheduledProfile = assistProfile;
-  const delayCfg = computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, assistProfile);
-  const minMs = Math.round(delayCfg.minSec * 1000);
-  const maxMs = Math.round(delayCfg.maxSec * 1000);
-  const instantObvious = shouldBypassAutomoveDelay(assistProfile, automovePlannedMove, automoveTargetFen);
-  if (instantObvious) delayCfg.reasons.push('obvious-instant');
-  automoveDelayMs = instantObvious
-    ? 0
-    : (minMs + Math.floor(Math.random() * (Math.max(0, maxMs - minMs) + 1)));
+  automovePlannedMeta = automoveMode === 'human' ? humanGameState.selectedMeta : null;
+  const humanTiming = automoveMode === 'human'
+    ? computeHumanAutomoveTiming(boardEl, playerSide, turn)
+    : null;
+  const delayCfg = humanTiming || computeAutomoveDelayRangeSeconds(boardEl, playerSide, turn, assistProfile);
+  if (humanTiming) {
+    automoveDelayMs = Math.round(humanTiming.remainingDelaySec * 1000);
+  } else {
+    const minMs = Math.round(delayCfg.minSec * 1000);
+    const maxMs = Math.round(delayCfg.maxSec * 1000);
+    const instantObvious = shouldBypassAutomoveDelay(assistProfile, automovePlannedMove, automoveTargetFen);
+    if (instantObvious) delayCfg.reasons.push('obvious-instant');
+    automoveDelayMs = instantObvious
+      ? 0
+      : (minMs + Math.floor(Math.random() * (Math.max(0, maxMs - minMs) + 1)));
+  }
   automoveScheduledAt = now();
   automoveLog('scheduled', {
     profile: assistProfile,
@@ -2086,6 +2360,12 @@ async function performAutomove() {
     engine: getActiveEvalEngineLabel(),
     delayReasons: delayCfg.reasons,
     ownClockSec: delayCfg.ownClockSec,
+    complexity: humanTiming ? Number(humanTiming.complexity.toFixed(3)) : null,
+    thinkBudgetMs: humanTiming ? Math.round(humanTiming.budgetSec * 1000) : null,
+    engineElapsedMs: humanTiming ? Math.round(humanTiming.engineElapsedSec * 1000) : null,
+    reserveSec: humanTiming?.reserveSec ?? null,
+    clockBand: humanTiming?.band || null,
+    lossCp: automovePlannedMeta?.lossCp ?? null,
     topMoves: (lastEvalTopMoves || []).slice(0, 4)
   });
   updateAutomoveButtonState();
@@ -2098,6 +2378,11 @@ async function performAutomove() {
     const currentBoard = getBoardElement();
     if (!isProfileEnabled || !currentBoard) {
       automoveLog('cancel: disabled or board missing at fire time');
+      clearAutomoveSchedule();
+      return;
+    }
+    if (profile === 'automove' && automoveMode === 'human' && !isHumanAutomoveAllowedContext()) {
+      automoveLog('cancel: Human mode is outside a supported game context');
       clearAutomoveSchedule();
       return;
     }
@@ -2126,18 +2411,32 @@ async function performAutomove() {
       return;
     }
     const sent = executeAutomoveMove(automovePlannedMove);
-    automoveLog('move dispatched', { move: automovePlannedMove, sent });
+    const executionMs = sent ? finishAutomoveTiming(automoveTargetFen) : null;
+    automoveLog('move dispatched', {
+      mode: automoveMode,
+      move: automovePlannedMove,
+      sent,
+      complexity: automovePlannedMeta?.complexity ?? null,
+      lossCp: automovePlannedMeta?.lossCp ?? null,
+      reason: automovePlannedMeta?.reason || null,
+      executionMs,
+    });
     if (!sent) {
       blockAutomoveFor(automoveTargetFen, automovePlannedMove, 2200);
       clearAutomoveSchedule();
       return;
     }
+    commitHumanMoveState(automovePlannedMeta);
 
     // Verify if turn changed; if not, try one more time quickly.
     sleep(220).then(() => {
       const turnAfter = detectSideToMove();
       const stillEnabled = profile === 'puzzleRush' ? isPuzzleRushEnabled : isAutomoveEnabled;
       if (!stillEnabled) {
+        clearAutomoveSchedule();
+        return;
+      }
+      if (profile === 'automove' && automoveMode === 'human' && !isHumanAutomoveAllowedContext()) {
         clearAutomoveSchedule();
         return;
       }
@@ -2542,7 +2841,7 @@ function createLocalMaiaPortWorker() {
 }
 
 function isLocalStockfishProvider() {
-  return stockfishProvider === 'local';
+  return isHumanAutomoveActive() || stockfishProvider === 'local';
 }
 
 function normalizeMaiaElo(value) {
@@ -2583,11 +2882,13 @@ function getActiveEvalEngineId() {
 
 function getActiveEvalEngineCacheToken(engineId = getActiveEvalEngineId()) {
   if (engineId === 'maia') return `maia-${normalizeMaiaElo(maiaElo)}`;
+  if (isHumanAutomoveActive()) return 'stockfish-local-human';
   return `stockfish-${stockfishProvider}`;
 }
 
 function getActiveEvalEngineLabel(engineId = getActiveEvalEngineId()) {
   if (engineId === 'maia') return `Maia ${normalizeMaiaElo(maiaElo)}`;
+  if (isHumanAutomoveActive()) return 'Local Stockfish (Human)';
   return stockfishProvider === 'local' ? 'Local Stockfish' : 'Stockfish API';
 }
 
@@ -2785,6 +3086,41 @@ function ensureLocalStockfishEngine() {
   return localStockfishInitPromise;
 }
 
+function getHumanLocalSearchTimeoutMs(fen, queryDepth) {
+  const boardEl = getBoardElement();
+  const side = getPlayerSide(boardEl);
+  const turn = normalizeTurn(String(fen || '').split(/\s+/)[1] || '');
+  const clockSec = getOwnClockSecondsRemaining(boardEl, side, turn);
+  const fullmove = parseInt(String(fen || '').trim().split(/\s+/)[5] || '0', 10);
+  const isOpening = Number.isInteger(fullmove) && fullmove >= 1 && fullmove <= 10;
+  let bandLimitMs;
+  if (!Number.isFinite(clockSec)) bandLimitMs = 900;
+  else if (clockSec < 5) bandLimitMs = 180;
+  else if (clockSec < 20) bandLimitMs = 450;
+  else if (clockSec < 60) bandLimitMs = 800;
+  else if (clockSec <= 180) bandLimitMs = 1200;
+  else bandLimitMs = 1800;
+
+  if (isOpening) {
+    const openingLimitMs = !Number.isFinite(clockSec)
+      ? 300
+      : clockSec < 5 ? 120
+      : clockSec < 20 ? 160
+      : clockSec < 60 ? 240
+      : 350;
+    bandLimitMs = Math.min(bandLimitMs, openingLimitMs);
+  }
+  bandLimitMs = Math.max(100, Math.round(bandLimitMs * (humanGameState.engineDeadlineJitter || 1)));
+
+  const depthLimitMs = Math.max(160, Math.round((Number(queryDepth) || 4) * 180));
+  const positionElapsedMs = humanGameState.positionStartedAt
+    ? Math.max(0, now() - humanGameState.positionStartedAt)
+    : 0;
+  const totalCapSec = window.CSEHumanAutomove?.getClockCapSeconds(clockSec) || 4;
+  const remainingTotalMs = Math.max(120, Math.round(totalCapSec * 1000) - positionElapsedMs);
+  return Math.max(120, Math.min(bandLimitMs, depthLimitMs, remainingTotalMs));
+}
+
 async function runLocalStockfishEval(fen, queryDepth, signal) {
   const worker = await ensureLocalStockfishEngine();
   if (!worker) return null;
@@ -2795,7 +3131,9 @@ async function runLocalStockfishEval(fen, queryDepth, signal) {
   }
 
   const turn = fen.split(' ')[1] || 'w';
-  const timeoutMs = (isAutomoveEnabled || isPuzzleRushEnabled)
+  const timeoutMs = isHumanAutomoveActive()
+    ? getHumanLocalSearchTimeoutMs(fen, queryDepth)
+    : (isAutomoveEnabled || isPuzzleRushEnabled)
     ? Math.max(1000, STOCKFISH_TIMEOUT_FAST_MS + 420)
     : Math.max(2200, queryDepth * 170);
 
@@ -2815,7 +3153,9 @@ async function runLocalStockfishEval(fen, queryDepth, signal) {
 
     search.timeoutId = setTimeout(() => {
       try { worker.postMessage('stop'); } catch {}
-      clearLocalStockfishSearch(null);
+      const partialResult = buildLocalStockfishResult(search.turn, null, search.linesByPv);
+      if (partialResult) partialResult.partial = true;
+      clearLocalStockfishSearch(partialResult);
     }, timeoutMs);
 
     if (signal) {
@@ -3234,6 +3574,13 @@ function getEvalQueryDepth(fen = lastEvalFen) {
   }
 
   if (isAutomoveEnabled && !isPuzzleContext()) {
+    if (automoveMode === 'human') {
+      const boardEl = getBoardElement();
+      const side = getPlayerSide(boardEl);
+      const turn = normalizeTurn(String(fen || '').split(/\s+/)[1] || '') || detectSideToMove();
+      const clockSec = getOwnClockSecondsRemaining(boardEl, side, turn);
+      return window.CSEHumanAutomove?.getHumanBaseDepth(clockSec) || 6;
+    }
     // Maia uses a fixed short move-time; Stockfish remains depth-capped.
     const fastDepthCap = automoveMode === 'legit' ? 5 : 8;
     return Math.max(4, Math.min(fastDepthCap, suggestMoveDepth));
@@ -3375,7 +3722,7 @@ async function fetchEval(fen) {
     addFrom(payload?.continuation);
     return normalizeTopMoves(collected);
   };
-  const allowApiFallback = activeEngineId !== 'maia' && (stockfishProvider === 'api' || stockfishProvider === 'local');
+  const allowApiFallback = activeEngineId !== 'maia' && !isHumanAutomoveActive() && (stockfishProvider === 'api' || stockfishProvider === 'local');
 
   if (activeEngineId === 'maia') {
     // Maia is local-only: do not replace a slow/failed Maia response with
@@ -3402,7 +3749,20 @@ async function fetchEval(fen) {
 
   if (isLocalStockfishProvider()) {
     try {
-      const localResult = await runLocalStockfishEval(fen, queryDepth, signal);
+      let localResult = await runLocalStockfishEval(fen, queryDepth, signal);
+      if (localResult && isHumanAutomoveActive()) {
+        const side = normalizeTurn(turn);
+        let humanAnalysis = buildHumanPositionAnalysis(fen, localResult.pvLines, side);
+        const desiredDepth = queryDepth + (humanAnalysis.complexity >= 0.68 ? 1 : 0);
+        if (!localResult.partial && humanAnalysis.complexity >= 0.68 && desiredDepth > queryDepth && !signal.aborted) {
+          const refined = await runLocalStockfishEval(fen, queryDepth + 1, signal);
+          if (refined) {
+            localResult = refined;
+            humanAnalysis = buildHumanPositionAnalysis(fen, refined.pvLines, side);
+          }
+        }
+        localResult.humanAnalysis = humanAnalysis;
+      }
       if (localResult) {
         localResult.engine = activeEngineId === 'maia' ? 'stockfish-fallback' : 'stockfish';
         setCachedEval(fen, queryDepth, localResult, engineToken);
@@ -3989,7 +4349,7 @@ function applySavedGuiAndModuleState() {
       stockfishProvider = saved.settings.stockfishProvider;
     }
     if (Number.isFinite(saved.settings.maiaElo)) maiaElo = normalizeMaiaElo(saved.settings.maiaElo);
-    if (saved.settings.automoveMode === 'legit' || saved.settings.automoveMode === 'blatant') automoveMode = saved.settings.automoveMode;
+    if (AUTOMOVE_MODES.includes(saved.settings.automoveMode)) automoveMode = saved.settings.automoveMode;
     if (Number.isFinite(saved.settings.automoveDelayMin)) automoveDelayMin = Math.max(0, Math.min(15, Math.round(saved.settings.automoveDelayMin)));
     if (Number.isFinite(saved.settings.automoveDelayMax)) automoveDelayMax = Math.max(0, Math.min(15, Math.round(saved.settings.automoveDelayMax)));
     if (automoveDelayMax < automoveDelayMin) automoveDelayMax = automoveDelayMin;
@@ -4232,10 +4592,11 @@ function getActiveModuleHudEntries() {
     : '';
 
   if (isAutomoveEnabled) {
-    const timer = automoveScheduledProfile === 'automove' ? activeTimer : '';
+    const timer = getAutomoveTimingText();
+    const modeLabel = getAutomoveModeLabel();
     entries.push({
-      key: 'AutoMove|' + timer,
-      html: `AutoMove${timer ? ` <span class="cse-gui-hud-timer">${timer}</span>` : ''}`,
+      key: `AutoMove|${modeLabel}|${timer}`,
+      html: `AutoMove <span class="cse-gui-hud-mode">[${modeLabel}]</span>${timer ? ` <span class="cse-gui-hud-timer">${timer}</span>` : ''}`,
     });
   }
   if (isPuzzleRushEnabled) {
@@ -4362,7 +4723,7 @@ function cseRenderVerdantGui(modal, allMods) {
     const isOpen = cseGuiState.openSettings === mod.id;
     return `
       <div class="cse-verdant-module ${isOpen ? 'is-settings-open' : ''}" data-module-id="${mod.id}" title="Right-click for ${mod.label} settings">
-        <span class="cse-verdant-module-name">${mod.label}</span>
+        <span class="cse-verdant-module-name">${mod.label}${mod.id === 'AutoMove' ? ` <span class="cse-mc-mode-badge">[${getAutomoveModeLabel()}]</span>${isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-automove"></span>' : ''}` : ''}</span>
         <button type="button" class="cse-verdant-toggle ${mod.active ? 'is-on' : ''}" data-module-toggle="${mod.id}" aria-label="Toggle ${mod.label}" aria-pressed="${mod.active ? 'true' : 'false'}"><span></span></button>
       </div>
       ${isOpen ? `<div class="cse-verdant-inline-settings-host" data-settings-host="${mod.id}"></div>` : ''}
@@ -4625,7 +4986,7 @@ function cseRenderGui() {
               </div>
               <div class="cse-gs-note">
                 <span class="cse-gs-note-icon">i</span>
-                <span>AutoMove Legit uses Maia ${normalizedMaiaElo}; Blatant and Puzzle Rush use Stockfish.</span>
+                <span>AutoMove Legit uses Maia ${normalizedMaiaElo}; Human always uses local Stockfish; Blatant and Puzzle Rush use the selected Stockfish provider.</span>
               </div>
             </div>
 
@@ -4921,7 +5282,7 @@ function cseRenderGui() {
           </div>` : '<div class="cse-mc-dots cse-mc-dots-disabled" title="No settings"><span></span><span></span><span></span></div>'}
         </div>
       </div>
-      <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' && isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-automove"></span>' : ''}${mod.id === 'PuzzleRush' && isPuzzleRushEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-puzzlerush"></span>' : ''}${mod.id === 'AutoPlay' && isAutoPlayEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-autoplay"></span>' : ''}</div>
+      <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' ? ` <span class="cse-mc-mode-badge">[${getAutomoveModeLabel()}]</span>${isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-automove"></span>' : ''}` : ''}${mod.id === 'PuzzleRush' && isPuzzleRushEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-puzzlerush"></span>' : ''}${mod.id === 'AutoPlay' && isAutoPlayEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-autoplay"></span>' : ''}</div>
       <div class="cse-mc-card-desc">${desc}</div>
       ${isRunning ? '<div class="cse-mc-running"><span class="cse-mc-running-dot"></span>Running</div>' : ''}
       <div class="cse-mc-fav ${isFav ? 'cse-mc-fav-on' : ''}" data-id="${mod.id}" title="${isFav ? 'Remove from favorites' : 'Add to favorites'}">&#9733;</div>
@@ -5003,10 +5364,12 @@ function setAutomoveEnabled(enabled) {
   if (!isAutomoveEnabled) {
     clearAutomoveSchedule();
     clearPremoveSchedule();
+    resetAutomoveTimingState(false);
     if (!isPuzzleRushEnabled) stopAutomoveUiTicker();
   } else {
     startAutomoveUiTicker();
     if (automoveMode === 'legit') ensureLocalMaiaEngine().catch(err => console.error('[CSE][Maia] prewarm failed:', err));
+    if (automoveMode === 'human') ensureLocalStockfishEngine().catch(err => console.error('[CSE][Stockfish] Human prewarm failed:', err));
   }
   ensureEvalEngineState(true);
   if (isAutomoveEnabled || isPuzzleRushEnabled) performAutomove();
@@ -5121,8 +5484,14 @@ function cseRenderSettingsPanel(modId) {
           <div class="cse-mc-mode-btns">
             <button class="cse-mc-mbtn ${automoveMode === 'legit' ? 'cse-mc-mbtn-on' : ''}" data-mode="legit">Legit</button>
             <button class="cse-mc-mbtn ${automoveMode === 'blatant' ? 'cse-mc-mbtn-on' : ''}" data-mode="blatant">Blatant</button>
+            <button class="cse-mc-mbtn ${automoveMode === 'human' ? 'cse-mc-mbtn-on' : ''}" data-mode="human">Human</button>
           </div>
         </div>
+        ${automoveMode === 'human' ? `
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">Strength, timing and forced premoves are automatic</span>
+        </div>
+        ` : `
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Maia strength</span><span class="cse-mc-sval" id="cse-sp-maia-elo-val">${normalizeMaiaElo(maiaElo)}</span></div>
           <input type="range" class="cse-mc-slider" id="cse-sp-maia-elo" min="${MAIA_ELO_MIN}" max="${MAIA_ELO_MAX}" step="${MAIA_ELO_STEP}" value="${normalizeMaiaElo(maiaElo)}">
@@ -5157,6 +5526,7 @@ function cseRenderSettingsPanel(modId) {
           <span class="cse-mc-slabel">Toggle hotkey</span>
           <input type="text" class="cse-mc-hotkey-input" id="cse-sp-automove-hotkey" value="${escapeHtmlAttr(formatHotkeyLabel(automoveToggleHotkey))}" data-hotkey="${escapeHtmlAttr(automoveToggleHotkey)}" readonly>
         </div>
+        `}
       ` : isPuzzleRush ? `
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-pr-depth-val">${puzzleRushDepth}</span></div>
@@ -5303,7 +5673,7 @@ function cseRenderSettingsPanel(modId) {
     ov.querySelectorAll('.cse-mc-mbtn').forEach(btn => {
       btn.addEventListener('click', () => {
         automoveMode = uiTheme === 'verdant' && btn.classList.contains('cse-mc-mbtn-on')
-          ? (automoveMode === 'legit' ? 'blatant' : 'legit')
+          ? getNextAutomoveMode(automoveMode)
           : btn.dataset.mode;
         ov.querySelectorAll('.cse-mc-mbtn').forEach(b => b.classList.toggle('cse-mc-mbtn-on', b.dataset.mode === automoveMode));
         evalCache.clear();
@@ -5313,9 +5683,14 @@ function cseRenderSettingsPanel(modId) {
         lastEvalTopMoves = [];
         lastEvalPvLines = [];
         lastEvalMate = null;
+        clearAutomoveSchedule();
+        clearPremoveSchedule();
+        resetAutomoveTimingState(true);
+        resetHumanGameState(getHumanGameToken());
         cseSaveState();
         updateAutomoveModeUI();
         if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(err => console.error('[CSE][Maia] prewarm failed:', err));
+        if (isAutomoveEnabled && automoveMode === 'human') ensureLocalStockfishEngine().catch(err => console.error('[CSE][Stockfish] Human prewarm failed:', err));
         ensureEvalEngineState(true);
       });
     });
@@ -5342,26 +5717,28 @@ function cseRenderSettingsPanel(modId) {
 
     const dminSl = ov.querySelector('#cse-sp-dmin');
     const dmaxSl = ov.querySelector('#cse-sp-dmax');
-    dminSl.addEventListener('input', () => {
-      automoveDelayMin = parseInt(dminSl.value, 10);
-      if (automoveDelayMin > automoveDelayMax) {
-        automoveDelayMax = automoveDelayMin;
-        dmaxSl.value = automoveDelayMax;
-        ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
-      }
-      ov.querySelector('#cse-sp-dmin-val').textContent = automoveDelayMin + 's';
-      cseSaveState();
-    });
-    dmaxSl.addEventListener('input', () => {
-      automoveDelayMax = parseInt(dmaxSl.value, 10);
-      if (automoveDelayMax < automoveDelayMin) {
-        automoveDelayMin = automoveDelayMax;
-        dminSl.value = automoveDelayMin;
+    if (dminSl && dmaxSl) {
+      dminSl.addEventListener('input', () => {
+        automoveDelayMin = parseInt(dminSl.value, 10);
+        if (automoveDelayMin > automoveDelayMax) {
+          automoveDelayMax = automoveDelayMin;
+          dmaxSl.value = automoveDelayMax;
+          ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
+        }
         ov.querySelector('#cse-sp-dmin-val').textContent = automoveDelayMin + 's';
-      }
-      ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
-      cseSaveState();
-    });
+        cseSaveState();
+      });
+      dmaxSl.addEventListener('input', () => {
+        automoveDelayMax = parseInt(dmaxSl.value, 10);
+        if (automoveDelayMax < automoveDelayMin) {
+          automoveDelayMin = automoveDelayMax;
+          dminSl.value = automoveDelayMin;
+          ov.querySelector('#cse-sp-dmin-val').textContent = automoveDelayMin + 's';
+        }
+        ov.querySelector('#cse-sp-dmax-val').textContent = automoveDelayMax + 's';
+        cseSaveState();
+      });
+    }
 
     const lowtimeCb = ov.querySelector('#cse-sp-fast-lowtime');
     const openingCb = ov.querySelector('#cse-sp-fast-opening');
@@ -5714,10 +6091,18 @@ async function tickEvalBar() {
     hideBestMoveOverlay();
     clearAutomoveSchedule();
     clearPremoveSchedule();
+    resetAutomoveTimingState(false);
     maybeAutoReloadStockfish();
     return;
   }
   stockfishNoFenSinceAt = 0;
+  if (isHumanAutomoveActive()) syncHumanPositionState(fen);
+  if (isAutomoveEnabled) {
+    const timingBoard = getBoardElement();
+    const timingSide = getPlayerSide(timingBoard);
+    const timingTurn = normalizeTurn(String(fen).split(/\s+/)[1] || '');
+    if (timingSide && timingTurn) trackAutomoveTurnStart(fen, timingSide, timingTurn);
+  }
 
   const fallbackDepthActivated = updatePuzzleRushDepthFallback(fen);
 
@@ -5886,6 +6271,7 @@ if (isAutoPlayEnabled) startAutoPlayTicker();
 if (isToxicChatEnabled) startToxicChatTicker();
 syncGuiHudPanel();
 if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(err => console.error('[CSE][Maia] prewarm failed:', err));
+if (isAutomoveEnabled && automoveMode === 'human') ensureLocalStockfishEngine().catch(err => console.error('[CSE][Stockfish] Human prewarm failed:', err));
 ensureEvalEngineState(true);
 cseSaveState();
 window.CSEStatsCheater?.scanAndInject?.();
@@ -5905,7 +6291,10 @@ new MutationObserver(() => {
     lastEvalPvLines = [];
     lastEvalMate = null;
     lastEvalMoveSourceFen = null;
+    clearAutomoveSchedule();
     clearPremoveSchedule();
+    resetAutomoveTimingState(true);
+    resetHumanGameState(null);
     clearAutoPlaySchedule(true);
     clearToxicChatState();
     window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());

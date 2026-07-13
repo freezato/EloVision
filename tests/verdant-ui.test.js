@@ -42,8 +42,11 @@ test('the Verdant window keeps the pointer-driven drag handle', () => {
   assert.match(core, /clampToViewport\(modal/);
 });
 
-test('Verdant shows Mode as one compact click-to-switch value', () => {
+test('Verdant cycles its compact Mode value through all three modes', () => {
   assert.match(css, /cse-mc-mbtn:not\(\.cse-mc-mbtn-on\) \{ display:none; \}/);
   assert.match(core, /uiTheme === 'verdant' && btn\.classList\.contains\('cse-mc-mbtn-on'\)/);
-  assert.match(core, /automoveMode === 'legit' \? 'blatant' : 'legit'/);
+  assert.match(core, /const AUTOMOVE_MODES = \['legit', 'blatant', 'human'\]/);
+  assert.match(core, /getNextAutomoveMode\(automoveMode\)/);
+  assert.match(core, /data-mode="human">Human<\/button>/);
+  assert.match(core, /cse-verdant-module-name[\s\S]*?cse-mc-mode-badge/);
 });

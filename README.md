@@ -26,9 +26,10 @@ Click the 🕵️ button next to any username to run an automated cheating analy
 Automated move execution powered by Stockfish evaluation:
 - **Blatant mode**: plays instantly
 - **Legit mode**: randomized delay between configurable min/max seconds
+- **Human mode**: in online and computer games, automatically chooses Stockfish strength, a safe weighted MultiPV move, and reflection time from the position and clock
 - **Speed-up when low on time** (< 30s on clock)
 - **Opening speed-up** option (first 8 full moves)
-- **Smart premoves**: queues premoves in tactically forced positions
+- **Smart premoves**: configurable for Legit; Human enables them automatically only for verified recaptures or forced replies
 
 ### 📡 Stockfish Evaluation Bar
 Real-time position evaluation with selectable engine provider:
@@ -48,7 +49,7 @@ Automatically solves Chess.com Puzzle Rush puzzles:
 
 ### ▶️ Auto Play
 Continuous game automation:
-- Auto-accepts rematches
+- Starts a fresh match from the end screen and can optionally accept an incoming rematch
 - Persists across Chess.com's SPA navigation
 
 ### 🖥️ Tools GUI (HUD)
@@ -70,6 +71,7 @@ A central control panel accessible via the **right Shift key** or the floating `
 ├── styles.css                 # All UI styles
 └── modules/
     ├── core-main.js           # Core engine: eval bar, automove, FEN extraction, Stockfish, GUI
+    ├── human-automove.js      # Human complexity, move selection, timing, forced-premoves policy
     ├── stats-cheater.js       # Opponent stats panel + cheater finder
     ├── eval-tools.js          # Eval toggle button injection
     ├── auto-modules.js        # URL change / SPA navigation hooks
@@ -116,8 +118,8 @@ All settings are accessible through the **Tools GUI** and are automatically pers
 
 | Setting | Description |
 |---|---|
-| `AutoMove Mode` | `blatant` (instant) or `legit` (randomized delay) |
-| `Delay Min / Max` | Range in seconds for legit mode |
+| `AutoMove Mode` | `blatant` (instant), `legit` (Maia + configured delay), or `human` (fully automatic) |
+| `Delay Min / Max` | Range in seconds for Legit and Blatant; retained but ignored by Human |
 | `Fast when low time` | Speed up automove when clock < 30s |
 | `Fast in opening` | Speed up during first 8 full moves |
 | `Smart Premoves` | Queue premoves in forced tactical lines |
@@ -135,6 +137,8 @@ All settings are accessible through the **Tools GUI** and are automatically pers
 
 - **FEN Extraction**: Reads the current board position by scanning the DOM for `chess-board`, `wc-chess-board`, `[data-fen]`, and move list `[data-ply]` attributes, then reconstructs a valid FEN string including castling rights and turn.
 - **Stockfish Integration**: Uses local bundled Stockfish by default and can switch to the [Stockfish Online REST API](https://stockfish.online). Results are cached for 12 seconds to avoid redundant requests.
+- **Human AutoMove**: Always uses local Stockfish with MultiPV 4. Base depth is 8 at 60+ seconds, 6 at 20–60, 5 at 5–20, and 4 below 5 seconds, plus one level for complex positions. It keeps a 12% clock reserve, subtracts engine time from the total think budget, and uses a 0.3–4 second fallback when no clock can be read.
+- **Human diagnostics**: AutoMove logs include mode, position complexity, remaining clock, computed budget, engine time, selected move, centipawn loss, and any premove reason.
 - **Stats API**: Fetches data from the public [Chess.com API](https://api.chess.com) (`/pub/player/{username}/stats` and `/games/archives`). All responses are cached in-memory for 5 minutes.
 - **SPA Navigation**: A `MutationObserver` on `document` watches for URL changes and resets all state (eval cache, move overlays, premove schedules) on navigation.
 - **State Persistence**: Module states, settings, and eval bar position are serialized to `localStorage` under the key `cse_mod_state_v1` and restored on page load.
