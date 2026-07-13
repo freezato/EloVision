@@ -5343,7 +5343,7 @@ function cseRenderVerdantGui(modal, allMods) {
   };
   const themeOptions = [
     ['aurora', 'Maia Classic'],
-    ['blockforge', 'BlockCraft Classic'],
+    ['blockforge', 'EloVision'],
     ['voidos', 'Voidtech Neon'],
     ['claude', 'Claude'],
     ['verdant', 'Verdant'],
@@ -5353,7 +5353,7 @@ function cseRenderVerdantGui(modal, allMods) {
 
   modal.classList.add('cse-verdant-window');
   const logo = modal.querySelector('.cse-mc-logo');
-  if (logo) logo.textContent = 'Chess Stats';
+  if (logo) logo.textContent = 'EloVision';
   grid.className = 'cse-mc-grid cse-verdant-shell';
   grid.innerHTML = `
     <div class="cse-verdant-scroll">
@@ -5514,7 +5514,7 @@ function cseRenderBlockcraftGui(modal, allMods) {
   grid.className = 'cse-mc-grid cse-bc-shell';
   grid.innerHTML = `
     <aside class="cse-bc-sidebar">
-      <div class="cse-bc-theme-plaque"><b>BLOCKCRAFT CLASSIC</b><small>(MINECRAFT STYLE)</small></div>
+      <div class="cse-bc-theme-plaque"><b>ELOVISION</b><small>(BLOCKCRAFT THEME)</small></div>
       <nav class="cse-bc-nav" aria-label="Blockcraft navigation">
         <button type="button" class="${tab === 'ALL' ? 'is-active' : ''}" data-bc-tab="ALL">${cseBlockcraftIcon('grass', 44)}<span><b>ALL MODULES</b><small>Browse all modules</small></span><i>›</i></button>
         <button type="button" class="${tab === 'FAVORITE' ? 'is-active' : ''}" data-bc-tab="FAVORITE">${cseBlockcraftIcon('star', 42)}<span><b>FAVORITES</b><small>Your favorite modules</small></span></button>
@@ -5524,7 +5524,7 @@ function cseRenderBlockcraftGui(modal, allMods) {
         <button type="button" data-bc-section="notifications">${cseBlockcraftIcon('bell', 42)}<span><b>NOTIFICATIONS</b><small>Alerts and sounds</small></span></button>
         <button type="button" data-bc-section="about">${cseBlockcraftIcon('book', 42)}<span><b>ABOUT</b><small>Version and credits</small></span></button>
       </nav>
-      <div class="cse-bc-app-info"><b>APPLICATION INFO</b><span>▣ Maia Chess v1.0.0</span><span>▣ Built for players.</span><span>▣ Optimized for performance.</span><span>▣ Enjoy the game!</span><small>© 2026 Maia Chess Team</small></div>
+      <div class="cse-bc-app-info"><b>APPLICATION INFO</b><span>▣ EloVision V2</span><span>▣ Built for players.</span><span>▣ Optimized for performance.</span><span>▣ Enjoy the game!</span><small>© 2026 EloVision Team</small></div>
     </aside>
     <main class="cse-bc-main">
       <section class="cse-bc-heading">
@@ -5605,12 +5605,12 @@ function cseRenderBlockcraftGlobalSettings(modal) {
   const lastReload = formatAgo(stockfishLastReloadAt);
   const sfStatus = stockfishFailureStreak === 0 ? 'HEALTHY' : 'DEGRADED';
   const sectionMeta = {
-    general: ['gear', 'SETTINGS', 'Configure Maia Chess to match your preferences.'],
+    general: ['gear', 'SETTINGS', 'Configure EloVision to match your preferences.'],
     stockfish: ['engine', 'ENGINES', 'Configure and monitor Stockfish and Maia.'],
-    appearance: ['torch', 'APPEARANCE', 'Customize the Blockcraft interface and visual behavior.'],
+    appearance: ['torch', 'APPEARANCE', 'Customize the EloVision interface and visual behavior.'],
     notifications: ['bell', 'NOTIFICATIONS', 'Choose which in-client alerts are displayed.'],
     about: ['book', 'ABOUT', 'Version, engine and storage information.'],
-  }[section] || ['gear', 'SETTINGS', 'Configure Maia Chess to match your preferences.'];
+  }[section] || ['gear', 'SETTINGS', 'Configure EloVision to match your preferences.'];
 
   modal.classList.add('cse-blockcraft-window');
   modal.classList.remove('cse-verdant-window');
@@ -5654,7 +5654,7 @@ function cseRenderBlockcraftGlobalSettings(modal) {
             </div>
             <div>
               <label class="cse-bc-setting-row"><span><b>Animations</b><small>Enable interface transitions and feedback.</small></span><input class="cse-bc-check" id="cse-ui-motion" type="checkbox" ${uiMotionEnabled ? 'checked' : ''}></label>
-              <div class="cse-bc-setting-row"><span><b>Current style</b><small>Pixelated Blockcraft component pack.</small></span><strong class="cse-bc-value">PIXELATED</strong></div>
+              <div class="cse-bc-setting-row"><span><b>Current style</b><small>Pixelated EloVision component pack.</small></span><strong class="cse-bc-value">PIXELATED</strong></div>
             </div>
           </div>
         </section>
@@ -5698,7 +5698,7 @@ function cseRenderBlockcraftGlobalSettings(modal) {
 
   const themes = [
     ['aurora', 'Maia Classic', 'Modern emerald interface'],
-    ['blockforge', 'Blockcraft Classic', 'Pixel grass and stone'],
+    ['blockforge', 'EloVision', 'BlockCraft Theme'],
     ['voidos', 'Voidtech Neon', 'Angular cyan overlay'],
     ['claude', 'Claude', 'Warm minimal interface'],
     ['verdant', 'Verdant', 'Compact dark client'],
@@ -5714,7 +5714,7 @@ function cseRenderBlockcraftGlobalSettings(modal) {
       <aside class="cse-bc-global-secondary">
         <section class="cse-bc-global-box"><h3>ACCENT COLOR</h3><div class="cse-bc-color-row cse-bc-color-row-large">${['emerald','cyan','violet','rose','gold'].map(color => `<button type="button" data-ui-accent="${color}" class="cse-bc-color-${color} ${uiAccent === color ? 'is-active' : ''}" aria-label="${color}"></button>`).join('')}</div></section>
         <section class="cse-bc-global-box"><h3>LAYOUT</h3><div class="cse-bc-side-control"><span>${cseBlockcraftIcon('grid', 26)}<b>Interface density</b></span><select id="cse-ui-density" class="cse-bc-select"><option value="compact" ${uiDensity === 'compact' ? 'selected' : ''}>Compact</option><option value="comfortable" ${uiDensity === 'comfortable' ? 'selected' : ''}>Normal</option><option value="spacious" ${uiDensity === 'spacious' ? 'selected' : ''}>Spacious</option></select></div><label class="cse-bc-setting-row"><span><b>Animations</b><small>Transitions and visual feedback.</small></span><input class="cse-bc-check" id="cse-ui-motion" type="checkbox" ${uiMotionEnabled ? 'checked' : ''}></label></section>
-        <section class="cse-bc-global-box"><h3>LIVE STYLE</h3><div class="cse-bc-mini-preview"><i></i><b>BLOCKCRAFT</b><span></span><span></span><button type="button" disabled>MODULE ACTIVE</button></div></section>
+        <section class="cse-bc-global-box"><h3>LIVE STYLE</h3><div class="cse-bc-mini-preview"><i></i><b>ELOVISION</b><span></span><span></span><button type="button" disabled>MODULE ACTIVE</button></div></section>
       </aside>
     </div>`;
 
@@ -5739,10 +5739,10 @@ function cseRenderBlockcraftGlobalSettings(modal) {
   const aboutContent = `
     <div class="cse-bc-global-columns">
       <div class="cse-bc-global-primary">
-        <section class="cse-bc-global-box cse-bc-about-hero"><span>${cseBlockcraftIcon('grass', 82)}</span><div><h3>MAIA CHESS</h3><b>Version 1.0.0</b><p>Analysis, automation and game insights in one configurable client.</p></div></section>
+        <section class="cse-bc-global-box cse-bc-about-hero"><span>${cseBlockcraftIcon('grass', 82)}</span><div><h3>ELOVISION</h3><b>Version V2</b><p>Analysis, automation and game insights in one configurable client.</p></div></section>
         <section class="cse-bc-global-box"><h3>APPLICATION INFO</h3><div class="cse-bc-about-list"><span>Built for players.</span><span>Optimized for performance.</span><span>Settings stored locally in your browser.</span></div></section>
       </div>
-      <aside class="cse-bc-global-secondary"><section class="cse-bc-global-box"><h3>SYSTEM</h3><div class="cse-bc-about-meta"><span>Engine provider <b>${providerLabel}</b></span><span>Interface shell <b>Blockcraft</b></span><span>State storage <b>Local</b></span><span>Motion <b>${uiMotionEnabled ? 'Enabled' : 'Disabled'}</b></span></div></section></aside>
+      <aside class="cse-bc-global-secondary"><section class="cse-bc-global-box"><h3>SYSTEM</h3><div class="cse-bc-about-meta"><span>Engine provider <b>${providerLabel}</b></span><span>Interface shell <b>EloVision</b></span><span>State storage <b>Local</b></span><span>Motion <b>${uiMotionEnabled ? 'Enabled' : 'Disabled'}</b></span></div></section></aside>
     </div>`;
 
   const content = section === 'stockfish' ? enginesContent
@@ -5754,7 +5754,7 @@ function cseRenderBlockcraftGlobalSettings(modal) {
   grid.className = 'cse-mc-grid cse-bc-shell';
   grid.innerHTML = `
     <aside class="cse-bc-sidebar">
-      <div class="cse-bc-theme-plaque"><b>BLOCKCRAFT CLASSIC</b><small>(MINECRAFT STYLE)</small></div>
+      <div class="cse-bc-theme-plaque"><b>ELOVISION</b><small>(BLOCKCRAFT THEME)</small></div>
       <nav class="cse-bc-nav" aria-label="Blockcraft navigation">
         <button type="button" data-bc-tab="ALL">${cseBlockcraftIcon('grass', 44)}<span><b>ALL MODULES</b><small>Browse all modules</small></span></button>
         <button type="button" data-bc-tab="FAVORITE">${cseBlockcraftIcon('star', 42)}<span><b>FAVORITES</b><small>Your favorite modules</small></span></button>
@@ -5764,7 +5764,7 @@ function cseRenderBlockcraftGlobalSettings(modal) {
         <button type="button" class="${section === 'notifications' ? 'is-active' : ''}" data-bc-section="notifications">${cseBlockcraftIcon('bell', 42)}<span><b>NOTIFICATIONS</b><small>Alerts and sounds</small></span></button>
         <button type="button" class="${section === 'about' ? 'is-active' : ''}" data-bc-section="about">${cseBlockcraftIcon('book', 42)}<span><b>ABOUT</b><small>Version and credits</small></span></button>
       </nav>
-      <div class="cse-bc-app-info"><b>APPLICATION INFO</b><span>▣ Maia Chess v1.0.0</span><span>▣ Built for players.</span><span>▣ Optimized for performance.</span><span>▣ Enjoy the game!</span><small>© 2026 Maia Chess Team</small></div>
+      <div class="cse-bc-app-info"><b>APPLICATION INFO</b><span>▣ EloVision V2</span><span>▣ Built for players.</span><span>▣ Optimized for performance.</span><span>▣ Enjoy the game!</span><small>© 2026 EloVision Team</small></div>
     </aside>
     <main class="cse-bc-main cse-bc-settings-main">
       <section class="cse-bc-heading"><span class="cse-bc-heading-icon">${cseBlockcraftIcon(sectionMeta[0], 55)}</span><span><h2>${sectionMeta[1]}</h2><p>${sectionMeta[2]}</p></span></section>
@@ -5879,7 +5879,7 @@ function cseRenderGui() {
   modal.classList.remove('cse-blockcraft-window');
   modal.classList.remove('cse-verdant-window');
   const logo = modal.querySelector('.cse-mc-logo');
-  if (logo) logo.textContent = 'Chess Stats';
+  if (logo) logo.textContent = 'EloVision V2';
   const mods = allMods.filter(m => tab === 'ALL' || (tab === 'FAVORITE' && cseGuiState.favorites[m.id]));
 
   modal.querySelectorAll('.cse-mc-tab').forEach(t => {
@@ -6082,8 +6082,8 @@ function cseRenderGui() {
             <div class="cse-gs-header"><div class="cse-gs-title">Appearance</div><div class="cse-gs-subtitle">Choose the client shell and tune its visual language.</div></div>
             <div class="cse-ap-section-title">Interface theme</div>
             <div class="cse-theme-grid">
-              <button class="cse-theme-card cse-theme-aurora ${uiTheme === 'aurora' ? 'is-selected' : ''}" data-ui-theme="aurora" type="button"><span class="cse-theme-mark">♞</span><strong>Maia Classic</strong><small>Original Maia Chess</small><span class="cse-theme-preview cse-preview-classic"><b></b><b></b><b></b></span><i>Modern · Emerald · Rounded</i></button>
-              <button class="cse-theme-card cse-theme-blockforge ${uiTheme === 'blockforge' ? 'is-selected' : ''}" data-ui-theme="blockforge" type="button"><span class="cse-theme-mark cse-pixel-grass" aria-hidden="true"></span><strong>Blockcraft Classic</strong><small>Minecraft-style utility client</small><span class="cse-theme-preview cse-preview-blockcraft"><b></b><b></b><b></b><b></b><b></b></span><i>Pixel · Grass · Stone</i></button>
+              <button class="cse-theme-card cse-theme-aurora ${uiTheme === 'aurora' ? 'is-selected' : ''}" data-ui-theme="aurora" type="button"><span class="cse-theme-mark">♞</span><strong>EloVision Classic</strong><small>Original EloVision</small><span class="cse-theme-preview cse-preview-classic"><b></b><b></b><b></b></span><i>Modern · Emerald · Rounded</i></button>
+              <button class="cse-theme-card cse-theme-blockforge ${uiTheme === 'blockforge' ? 'is-selected' : ''}" data-ui-theme="blockforge" type="button"><span class="cse-theme-mark cse-pixel-grass" aria-hidden="true"></span><strong>EloVision</strong><small>BlockCraft Theme</small><span class="cse-theme-preview cse-preview-blockcraft"><b></b><b></b><b></b><b></b><b></b></span><i>Pixel · Grass · Stone</i></button>
               <button class="cse-theme-card cse-theme-voidos ${uiTheme === 'voidos' ? 'is-selected' : ''}" data-ui-theme="voidos" type="button"><span class="cse-theme-mark cse-neon-chip" aria-hidden="true"></span><strong>Voidtech Neon</strong><small>Futuristic hack client</small><span class="cse-theme-preview cse-preview-voidtech"><b></b><b></b><b></b><b></b></span><i>Neon · Cyan · Angular HUD</i></button>
               <button class="cse-theme-card cse-theme-claude ${uiTheme === 'claude' ? 'is-selected' : ''}" data-ui-theme="claude" type="button"><span class="cse-theme-mark cse-claude-mark">C</span><strong>Claude</strong><small>Warm minimal interface</small><span class="cse-theme-preview cse-preview-claude"><b></b><b></b><b></b><b></b></span><i>Ivory · Terracotta · Calm</i></button>
               <button class="cse-theme-card cse-theme-verdant ${uiTheme === 'verdant' ? 'is-selected' : ''}" data-ui-theme="verdant" type="button"><span class="cse-theme-mark cse-verdant-mark">V</span><strong>Verdant</strong><small>Compact dark client</small><span class="cse-theme-preview cse-preview-verdant"><b></b><b></b><b></b><b></b></span><i>Obsidian · Mint · Focused</i></button>
@@ -6098,7 +6098,7 @@ function cseRenderGui() {
               <div class="cse-ap-preview">
                 <div class="cse-ap-preview-label">Live preview</div>
                 <section class="cse-ap-mini-window" aria-label="Theme preview">
-                  <header><span class="cse-ap-mini-logo">${uiTheme === 'claude' ? 'C' : uiTheme === 'verdant' ? 'V' : '♞'}</span><b>${uiTheme === 'blockforge' ? 'BLOCKCRAFT' : uiTheme === 'voidos' ? 'VOIDTECH' : uiTheme === 'claude' ? 'CLAUDE' : uiTheme === 'verdant' ? 'VERDANT' : 'MAIA CHESS'}</b><i></i><i></i><i></i></header>
+                  <header><span class="cse-ap-mini-logo">${uiTheme === 'claude' ? 'C' : uiTheme === 'verdant' ? 'V' : '♞'}</span><b>${uiTheme === 'blockforge' ? 'ELOVISION' : uiTheme === 'voidos' ? 'VOIDTECH' : uiTheme === 'claude' ? 'CLAUDE' : uiTheme === 'verdant' ? 'VERDANT' : 'ELOVISION'}</b><i></i><i></i><i></i></header>
                   <main><aside><span></span><span></span><span></span><span></span></aside><article><strong>Appearance</strong><small>${uiDensity} · ${uiAccent}</small><em></em><em></em><button type="button">MODULE ACTIVE</button></article></main>
                 </section>
               </div>
@@ -6125,7 +6125,7 @@ function cseRenderGui() {
             ].map(([key,label,copy], i) => `<div class="cse-gs-row"><div class="cse-gs-row-left"><span class="cse-gs-row-icon">${i + 1}</span><span><span class="cse-gs-row-title">${label}</span><span class="cse-gs-row-sub">${copy}</span></span></div><label class="cse-gs-switch"><input type="checkbox" data-notification-key="${key}" ${uiNotifications[key] ? 'checked' : ''}><span class="cse-gs-switch-track"></span><span class="cse-gs-switch-knob"></span></label></div>`).join('')}</div>
             <div class="cse-gs-footer">Notifications are saved automatically and appear inside Chess.com.</div></div>
         ` : activeSettingsSection === 'about' ? `
-          <div class="cse-gs-page cse-about-page"><div class="cse-gs-header"><div class="cse-gs-title">About</div><div class="cse-gs-subtitle">Maia Chess utility client.</div></div><div class="cse-about-hero"><div class="cse-about-mark">♞</div><div><b>Maia Chess</b><span>Version 1.0.0 · ${uiTheme}</span><p>Analysis, automation and game insights in one configurable client.</p></div></div><div class="cse-gs-block"><div class="cse-gs-block-kicker">SYSTEM</div><div class="cse-about-meta"><span>Engine provider</span><b>${providerLabel}</b><span>Interface shell</span><b>${uiTheme}</b><span>State storage</span><b>Local</b></div></div></div>
+          <div class="cse-gs-page cse-about-page"><div class="cse-gs-header"><div class="cse-gs-title">About</div><div class="cse-gs-subtitle">EloVision utility client.</div></div><div class="cse-about-hero"><div class="cse-about-mark">♞</div><div><b>EloVision</b><span>Version V2 · ${uiTheme}</span><p>Analysis, automation and game insights in one configurable client.</p></div></div><div class="cse-gs-block"><div class="cse-gs-block-kicker">SYSTEM</div><div class="cse-about-meta"><span>Engine provider</span><b>${providerLabel}</b><span>Interface shell</span><b> ${uiTheme === 'blockforge' ? 'EloVision' : uiTheme}</b><span>State storage</span><b>Local</b></div></div></div>
         ` : `<div class="cse-empty-settings">No settings available for this section.</div>`}
       </div>
     `;
@@ -7162,7 +7162,7 @@ function createToolsGui() {
 
   modal.innerHTML = `
     <div class="cse-mc-header" id="cse-mc-drag">
-      <div class="cse-mc-logo">Chess Stats</div>
+      <div class="cse-mc-logo">EloVision V2</div>
       <div class="cse-mc-tabs">
         <button class="cse-mc-tab" data-tab="ALL" style="color:#fff;border-bottom:2px solid #4a9e5c;">${SVG_ALL} ALL</button>
         <button class="cse-mc-tab" data-tab="FAVORITE" style="color:#555;border-bottom:2px solid transparent;">${SVG_FAV} FAVORITE</button>

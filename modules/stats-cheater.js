@@ -190,7 +190,7 @@
       renderStatsAnimated(panel, username, calcWLR(games1, username), calcWLR(games7, username), calcWLR(games30, username), playerStats);
     } catch (err) {
       renderError(panel, `Impossibile caricare le stats per "${username}"`);
-      console.error('[ChessStats]', err);
+      console.error('[EloVision]', err);
     }
   }
 

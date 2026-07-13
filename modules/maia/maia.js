@@ -62,7 +62,7 @@ async function handle(command, searchId = null) {
   if (text === 'uci') {
     await enginePromise;
     post('id name Maia Local LC0');
-    post('id author Maia Chess / Zerofish');
+    post('id author EloVision / Zerofish');
     post('uciok');
     return;
   }

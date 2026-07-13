@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Chess.com Opponent Stats",
-  "version": "1.0.0",
-  "description": "Mostra le statistiche dell'avversario su chess.com: win/lose in 1, 7, 30 giorni, WLR e peak ELO.",
+  "name": "EloVision",
+  "version": "2.0.0",
+  "description": "EloVision V2: statistiche dell'avversario su chess.com, WLR, peak ELO e strumenti di analisi.",
   "permissions": [
     "activeTab",
     "storage",
@@ -29,8 +29,7 @@
         "modules/core-main.js",
         "modules/eval-tools.js",
         "modules/auto-modules.js",
-        "modules/tools-gui.js",
-        "content.js"
+        "modules/tools-gui.js"
       ],
       "css": [
         "styles.css"

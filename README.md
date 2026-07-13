@@ -1,4 +1,4 @@
-# Chess.com Opponent Stats
+# EloVision V2
 
 Chrome extension for Chess.com with opponent statistics, live engine analysis,
 move-quality insights, configurable HUD themes, and optional automation tools.
@@ -193,7 +193,7 @@ Available interface themes:
 | Theme | Description |
 | --- | --- |
 | Maia Classic | Modern emerald rounded interface. |
-| Blockcraft Classic | Pixel/voxel utility-client style. |
+| EloVision | BlockCraft Theme. |
 | Voidtech Neon | Angular cyan technical overlay. |
 | Claude | Warm minimal interface. |
 | Verdant | Compact dark vertical client with grouped sections. |
@@ -231,7 +231,7 @@ Main settings include:
 | Eval display | Bar or percent display. |
 | General language | English or Italian. |
 | Number format | Default or European formatting. |
-| UI theme | Maia Classic, Blockcraft, Voidtech, Claude, or Verdant. |
+| UI theme | EloVision Classic, EloVision, Voidtech, Claude, or Verdant. |
 | Notifications | Toggles for move sent, premove queued, game finished, analysis warnings, and similar events. |
 
 ---
@@ -242,7 +242,6 @@ Main settings include:
 .
 |-- manifest.json
 |-- background.js
-|-- content.js
 |-- offscreen.html
 |-- offscreen.js
 |-- styles.css
