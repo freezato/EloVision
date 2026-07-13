@@ -17,6 +17,9 @@ test('GameFlow is loaded before core and exposed as a persisted GUI module', () 
   assert.match(core, /GameFlow: !!isGameFlowEnabled/);
   assert.match(core, /id: 'GameFlow', label: 'GameFlow'/);
   assert.match(core, /startGameFlowTicker\(\)/);
+  assert.match(core, /if \(!isGuiHudEnabled && !isGameFlowEnabled\)/);
+  assert.match(core, /isGuiHudEnabled \? getActiveModuleHudEntries\(\) : \[getGameFlowHudEntry\(\)\]/);
+  assert.match(core, /if \(isGameFlowEnabled\) entries\.push\(getGameFlowHudEntry\(\)\)/);
 });
 
 test('draw responses accept equal or worse positions and decline winning ones', () => {

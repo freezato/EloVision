@@ -169,7 +169,7 @@ test('Human is loaded before core, supports online games and keeps FEN, legality
 });
 
 test('Human settings persist as a third mode while keeping manual values untouched', () => {
-  assert.match(core, /const AUTOMOVE_MODES = \['legit', 'blatant', 'human'\]/);
+  assert.match(core, /const AUTOMOVE_MODES = \['human', 'legit', 'blatant'\]/);
   assert.match(core, /AUTOMOVE_MODES\.includes\(saved\.settings\.automoveMode\)/);
   assert.match(core, /data-mode="human">Human<\/button>/);
   assert.match(core, /Strength, timing and forced premoves are automatic/);

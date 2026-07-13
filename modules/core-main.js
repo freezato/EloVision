@@ -129,7 +129,7 @@ const MAIA_LOCAL_WEIGHTS_DIR = 'modules/maia/weights';
 const MAIA_LOCAL_BOOT_TIMEOUT_MS = 30000;
 const MAIA_LOCAL_SEARCH_TIMEOUT_MS = 1800;
 const CSE_STATE_KEY = 'cse_mod_state_v1';
-const AUTOMOVE_MODES = ['legit', 'blatant', 'human'];
+const AUTOMOVE_MODES = ['human', 'legit', 'blatant'];
 
 function cseReadState() {
   try {
@@ -5172,6 +5172,13 @@ function ensureEvalEngineState(forceTick = false) {
   if (forceTick) tickEvalBar();
 }
 
+function getGameFlowHudEntry() {
+  return {
+    key: `GameFlow|${gameFlowStatusKind}|${gameFlowStatus}`,
+    html: `GameFlow <span class="cse-gui-hud-status cse-status-${gameFlowStatusKind}">${escapeHtmlAttr(gameFlowStatus)}</span>`,
+  };
+}
+
 function getActiveModuleHudEntries() {
   const entries = [];
   const activeTimer = (automoveScheduledAt && automoveDelayMs > 0 && automoveScheduledProfile)
@@ -5203,6 +5210,7 @@ function getActiveModuleHudEntries() {
       html: `AutoPlay${autoPlayTimer ? ` <span class="cse-gui-hud-timer">${autoPlayTimer}</span>` : ''}`,
     });
   }
+  if (isGameFlowEnabled) entries.push(getGameFlowHudEntry());
   if (isToxicChatEnabled) entries.push({ key: 'ToxicChat', html: 'ToxicChat' });
   if (isGameInsightsEnabled) {
     const s = window.CSEGameInsights?.getLiveStats?.();
@@ -5231,14 +5239,14 @@ function ensureGuiHudPanel() {
 }
 
 function syncGuiHudPanel() {
-  if (!isGuiHudEnabled) {
+  if (!isGuiHudEnabled && !isGameFlowEnabled) {
     removeGuiHudPanel();
     return;
   }
   const panel = ensureGuiHudPanel();
   const list = panel.querySelector('.cse-gui-hud-list');
   if (!list) return;
-  const entries = getActiveModuleHudEntries();
+  const entries = isGuiHudEnabled ? getActiveModuleHudEntries() : [getGameFlowHudEntry()];
   const safeEntries = entries.length ? entries : [{ key: 'GUI', html: 'GUI' }];
   const signature = safeEntries.map(e => e.key).join('|');
   if (list.dataset.cseSignature === signature) return;
@@ -5252,12 +5260,6 @@ function toggleCseGuiModule(mod) {
   if (mod.id === 'AutoMove') {
     setAutomoveEnabled(!isAutomoveEnabled);
     return;
-  }
-  if (isGameFlowEnabled) {
-    entries.push({
-      key: `GameFlow|${gameFlowStatusKind}|${gameFlowStatus}`,
-      html: `GameFlow <span class="cse-gui-hud-status cse-status-${gameFlowStatusKind}">${escapeHtmlAttr(gameFlowStatus)}</span>`,
-    });
   }
   if (mod.id === 'PuzzleRush') {
     isPuzzleRushEnabled = !isPuzzleRushEnabled;
@@ -6511,9 +6513,9 @@ function cseBlockcraftSettingsMarkup(modId) {
         <div class="cse-bc-setting-row cse-bc-setting-stack">
           <span><b>Mode</b><small>Choose how AutoMove selects and times moves.</small></span>
           <div class="cse-mc-mode-btns">
+            <button class="cse-mc-mbtn ${automoveMode === 'human' ? 'cse-mc-mbtn-on' : ''}" data-mode="human">HUMAN</button>
             <button class="cse-mc-mbtn ${automoveMode === 'legit' ? 'cse-mc-mbtn-on' : ''}" data-mode="legit">LEGIT</button>
             <button class="cse-mc-mbtn ${automoveMode === 'blatant' ? 'cse-mc-mbtn-on' : ''}" data-mode="blatant">BLATANT</button>
-            <button class="cse-mc-mbtn ${automoveMode === 'human' ? 'cse-mc-mbtn-on' : ''}" data-mode="human">HUMAN</button>
           </div>
         </div>
         ${automoveMode === 'human' ? `
@@ -6640,9 +6642,9 @@ function cseRenderSettingsPanel(modId) {
         <div class="cse-mc-srow">
           <span class="cse-mc-slabel">Mode</span>
           <div class="cse-mc-mode-btns">
+            <button class="cse-mc-mbtn ${automoveMode === 'human' ? 'cse-mc-mbtn-on' : ''}" data-mode="human">Human</button>
             <button class="cse-mc-mbtn ${automoveMode === 'legit' ? 'cse-mc-mbtn-on' : ''}" data-mode="legit">Legit</button>
             <button class="cse-mc-mbtn ${automoveMode === 'blatant' ? 'cse-mc-mbtn-on' : ''}" data-mode="blatant">Blatant</button>
-            <button class="cse-mc-mbtn ${automoveMode === 'human' ? 'cse-mc-mbtn-on' : ''}" data-mode="human">Human</button>
           </div>
         </div>
         ${automoveMode === 'human' ? `
@@ -7464,7 +7466,7 @@ const observer = new MutationObserver(() => {
     window.CSEStatsCheater?.scanAndInject?.();
     window.CSEEvalTools?.scanAndInjectEval?.();
     syncBestMoveOverlay();
-    if (isGuiHudEnabled && (!guiHudPanel || !guiHudPanel.isConnected)) syncGuiHudPanel();
+    if ((isGuiHudEnabled || isGameFlowEnabled) && (!guiHudPanel || !guiHudPanel.isConnected)) syncGuiHudPanel();
   } catch (err) {
     console.error('[CSE] observer tick failed', err);
   }
