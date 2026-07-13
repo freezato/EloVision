@@ -86,6 +86,18 @@ let isPuzzleRushEnabled = false;
 let isAutoPlayEnabled = false;
 let isToxicChatEnabled = false;
 let isGameInsightsEnabled = false;
+let isGameFlowEnabled = false;
+let gameFlowSettings = window.CSEGameFlow?.normalizeSettings?.() || {
+  acceptDraws: true,
+  offerDraws: true,
+  autoResign: true,
+  acceptRematches: true,
+  drawThresholdCp: 35,
+  resignThresholdCp: 650,
+  stableSeconds: 8,
+  lowTimeProtectionSec: 12,
+  maxRematches: 2,
+};
 let puzzleRushDepth = 20;
 let suggestMoveDepth = 15; // depth for SuggestMove/Arrows (user configurable)
 let suggestMoveToggleHotkey = 'none'; // KeyboardEvent.code or 'none'
@@ -132,6 +144,8 @@ function cseReadState() {
 
 function cseSaveState() {
   const evalRect = evalBarPanel?.isConnected ? evalBarPanel.getBoundingClientRect() : null;
+  const guiRect = toolsModal?.isConnected ? toolsModal.getBoundingClientRect() : null;
+  const previousState = cseReadState();
   const state = {
     favorites: { ...(cseGuiState?.favorites || {}) },
     activeTab: cseGuiState?.activeTab || 'ALL',
@@ -142,6 +156,7 @@ function cseSaveState() {
       AutoPlay: !!isAutoPlayEnabled,
       ToxicChat: !!isToxicChatEnabled,
       GameInsights: !!isGameInsightsEnabled,
+      GameFlow: !!isGameFlowEnabled,
       SuggestMove: !!arrowsEnabled,
       EvaluationBar: !!isEvalBarEnabled,
       GUI: !!isGuiHudEnabled,
@@ -164,6 +179,7 @@ function cseSaveState() {
       toxicChatMessage,
       toxicChatSendOnStart,
       toxicChatSendOnEnd,
+      gameFlow: { ...gameFlowSettings },
       evalBarDisplayMode,
       generalLanguage,
       generalNumbersFormat,
@@ -175,7 +191,12 @@ function cseSaveState() {
       notifications: { ...uiNotifications },
       notificationPosition,
     },
-    evalBarPosition: evalRect ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) } : null,
+    evalBarPosition: evalRect
+      ? { left: Math.round(evalRect.left), top: Math.round(evalRect.top) }
+      : (previousState?.evalBarPosition || null),
+    guiPosition: guiRect
+      ? { left: Math.round(guiRect.left), top: Math.round(guiRect.top) }
+      : (previousState?.guiPosition || null),
   };
   try {
     localStorage.setItem(CSE_STATE_KEY, JSON.stringify(state));
@@ -584,6 +605,24 @@ let autoPlayAcceptRematch = true;
 let autoPlayGameOverToken = null;
 let autoPlayGameOverSeenAt = 0;
 let autoPlayGameOverNode = null;
+let gameFlowTickInterval = null;
+let gameFlowGameToken = null;
+let gameFlowLastPly = null;
+let gameFlowStatus = 'In attesa di una partita';
+let gameFlowStatusKind = 'idle';
+let gameFlowStatusUpdatedAt = 0;
+let gameFlowLastEval = { cp: null, mate: null, fenKey: null };
+let gameFlowLosingSince = 0;
+let gameFlowLosingConfirmations = 0;
+let gameFlowLastLosingEvalKey = null;
+let gameFlowPositionCounts = new Map();
+let gameFlowLastRecordedPosition = null;
+let gameFlowDrawOffered = false;
+let gameFlowHandledDrawToken = null;
+let gameFlowPendingResignConfirmation = 0;
+let gameFlowResigned = false;
+let gameFlowAcceptedRematches = 0;
+let gameFlowHandledRematchToken = null;
 const CSE_LOG_MAX_ENTRIES = 400;
 const CSE_LOG_MAX_RENDER_LINES = 160;
 let cseLogCheckerEnabled = false;
@@ -1012,6 +1051,10 @@ function toxicChatLog(...args) {
   csePushLog('ToxicChat', args);
 }
 
+function gameFlowLog(...args) {
+  csePushLog('GameFlow', args);
+}
+
 function clearAutoPlaySchedule(resetHandledToken = false) {
   if (autoPlayTimeout) {
     clearTimeout(autoPlayTimeout);
@@ -1054,7 +1097,10 @@ function escapeHtmlAttr(text) {
 function scoreAutoPlayActionText(text) {
   const t = normalizeActionText(text);
   if (!t) return 0;
-  if (/\b(accept rematch|accetta rivincita)\b/.test(t)) return autoPlayAcceptRematch ? 140 : 0;
+  if (/\b(accept rematch|accetta rivincita)\b/.test(t)) {
+    const gameFlowOwnsRematches = typeof isGameFlowEnabled !== 'undefined' && isGameFlowEnabled;
+    return !gameFlowOwnsRematches && autoPlayAcceptRematch ? 140 : 0;
+  }
   if (/\b(new game|new match|start new)\b/.test(t)) return 135;
   if (/\b(nuova partita|nuova sfida)\b/.test(t)) return 133;
   if (/\bnew\b/.test(t) && /\b(min|sec|second|rapid|blitz|bullet|daily)\b/.test(t)) return 130;
@@ -1204,6 +1250,330 @@ function stopAutoPlayTicker() {
   if (!autoPlayTickInterval) return;
   clearInterval(autoPlayTickInterval);
   autoPlayTickInterval = null;
+}
+
+function setGameFlowStatus(message, kind = 'idle') {
+  const nextMessage = String(message || 'In attesa');
+  if (gameFlowStatus === nextMessage && gameFlowStatusKind === kind) return;
+  gameFlowStatus = nextMessage;
+  gameFlowStatusKind = kind;
+  gameFlowStatusUpdatedAt = now();
+  gameFlowLog('status', { kind, message: nextMessage });
+  syncGuiHudPanel();
+}
+
+function updateGameFlowSettings(patch) {
+  gameFlowSettings = window.CSEGameFlow?.normalizeSettings?.({ ...gameFlowSettings, ...patch }) || { ...gameFlowSettings, ...patch };
+  gameFlowLosingSince = 0;
+  gameFlowLosingConfirmations = 0;
+  gameFlowLastLosingEvalKey = null;
+  cseSaveState();
+  if (isGameFlowEnabled) performGameFlowTick();
+}
+
+function resetGameFlowGameState(token = null, keepStatus = false) {
+  gameFlowGameToken = token;
+  gameFlowLastPly = null;
+  gameFlowLastEval = { cp: null, mate: null, fenKey: null };
+  gameFlowLosingSince = 0;
+  gameFlowLosingConfirmations = 0;
+  gameFlowLastLosingEvalKey = null;
+  gameFlowPositionCounts = new Map();
+  gameFlowLastRecordedPosition = null;
+  gameFlowDrawOffered = false;
+  gameFlowHandledDrawToken = null;
+  gameFlowPendingResignConfirmation = 0;
+  gameFlowResigned = false;
+  gameFlowHandledRematchToken = null;
+  if (!keepStatus) setGameFlowStatus(token ? 'Monitoraggio partita' : 'In attesa di una partita', 'idle');
+}
+
+function getGameFlowActionDescriptor(node) {
+  if (!node) return '';
+  return normalizeActionText([
+    node.textContent,
+    node.getAttribute?.('aria-label'),
+    node.getAttribute?.('title'),
+    node.getAttribute?.('data-cy'),
+    node.getAttribute?.('data-tooltip'),
+    typeof node.className === 'string' ? node.className : '',
+  ].filter(Boolean).join(' '));
+}
+
+function getGameFlowActionContext(node) {
+  const context = node?.closest?.([
+    '[role="dialog"]',
+    '[data-cy*="draw"]',
+    '[data-cy*="resign"]',
+    '[data-cy*="rematch"]',
+    '[class*="draw"]',
+    '[class*="resign"]',
+    '[class*="rematch"]',
+    '[class*="game-controls"]',
+    '[class*="modal"]',
+  ].join(','));
+  return getGameFlowActionDescriptor(context || node?.parentElement);
+}
+
+function scoreGameFlowAction(node, kind) {
+  const text = getGameFlowActionDescriptor(node);
+  const context = getGameFlowActionContext(node);
+  const exact = text.replace(/[^a-zà-ÿ]+/gi, ' ').trim();
+  const words = `${text} ${context}`.replace(/[^a-zà-ÿ]+/gi, ' ').replace(/\s+/g, ' ').trim();
+  const drawContext = /\b(draw|patta)\b/.test(words);
+  const resignContext = /\b(resign|abbandon|ritir|forfeit)\b/.test(words);
+  if (kind === 'accept-draw') {
+    if (/\b(accept (the )?draw|draw accept|accetta (la )?patta|patta accetta)\b/.test(words)) return 180;
+    if (drawContext && /^(accept|accetta|yes|sì|si)$/.test(exact)) return 150;
+  }
+  if (kind === 'decline-draw') {
+    if (/\b(decline draw|draw decline|reject draw|draw reject|rifiuta (la )?patta|patta rifiuta)\b/.test(words)) return 180;
+    if (drawContext && /^(decline|reject|rifiuta|no)$/.test(exact)) return 150;
+  }
+  if (kind === 'offer-draw') {
+    if (/\b(offer draw|draw offer|propose draw|draw propose|proponi (la )?patta|offri (la )?patta)\b/.test(words)) return 180;
+    if (/^(draw|patta)$/.test(exact) && !/\b(accept|decline|reject|accetta|rifiuta)\b/.test(words)) return 120;
+  }
+  if (kind === 'resign') {
+    if (/\b(resign|abbandona|ritirati|forfeit)\b/.test(words) && !/\b(cancel|annulla)\b/.test(words)) return 160;
+  }
+  if (kind === 'confirm-resign') {
+    if (/\b(confirm resign|resign confirm|resign game|conferma abbandono|abbandona partita)\b/.test(words)) return 190;
+    if (resignContext && /^(confirm|yes|sì|si|resign|abbandona)$/.test(exact)) return 170;
+  }
+  if (kind === 'accept-rematch' && /\b(accept rematch|rematch accept|accetta (la )?rivincita|rivincita accetta)\b/.test(words)) return 180;
+  return 0;
+}
+
+function getGameFlowAction(kind) {
+  const nodes = Array.from(document.querySelectorAll('button, a[role="button"], div[role="button"], span[role="button"]'));
+  const candidates = [];
+  for (const node of nodes) {
+    if (node.closest?.('#cse-mc-gui, .cse-gui-hud, #cse-toast-tray')) continue;
+    if (!isElementRenderable(node) || node.matches?.('[disabled], [aria-disabled="true"]')) continue;
+    const score = scoreGameFlowAction(node, kind);
+    if (score) candidates.push({ node, score, text: getGameFlowActionDescriptor(node) });
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+  if (!best) return null;
+  return { ...best, token: `${location.pathname}|${kind}|${best.text}` };
+}
+
+function clickGameFlowAction(action, reason, kind = 'decision') {
+  if (!action?.node) return false;
+  try {
+    action.node.click();
+    setGameFlowStatus(reason, kind);
+    gameFlowLog('clicked', { action: action.text, reason });
+    return true;
+  } catch (err) {
+    setGameFlowStatus(`Azione fallita: ${reason}`, 'warning');
+    gameFlowLog('click failed', { action: action.text, error: String(err?.message || err) });
+    return false;
+  }
+}
+
+function getOpponentClockSecondsRemaining(boardEl = getBoardElement()) {
+  if (!boardEl) return null;
+  const selectors = '.clock-component, .player-clock, [class*="clock-component"], [class*="player-clock"]';
+  const seen = new Set();
+  for (const clock of Array.from(document.querySelectorAll(selectors))) {
+    if (seen.has(clock) || !isElementRenderable(clock)) continue;
+    seen.add(clock);
+    if (isElementBottomHalf(clock, boardEl) !== false) continue;
+    const seconds = parseClockTextToSeconds(clock.textContent || '');
+    if (Number.isFinite(seconds)) return seconds;
+  }
+  return null;
+}
+
+function registerGameFlowEvaluation(result, fen = lastEvalFen) {
+  if (!isGameFlowEnabled || !result || !fen) return;
+  const playerSide = getPlayerSide(getBoardElement());
+  const evaluation = window.CSEGameFlow?.getPlayerEvaluation?.(result, playerSide) || { cp: null, mate: null };
+  const fenKey = window.CSEGameFlow?.getRepetitionKey?.(fen) || getFenBoardAndTurn(fen);
+  gameFlowLastEval = { ...evaluation, fenKey };
+  const losing = window.CSEGameFlow?.classifyLosingEvaluation?.({
+    playerCp: evaluation.cp,
+    playerMate: evaluation.mate,
+    settings: gameFlowSettings,
+  });
+  if (!losing?.losing) {
+    gameFlowLosingSince = 0;
+    gameFlowLosingConfirmations = 0;
+    gameFlowLastLosingEvalKey = null;
+    return;
+  }
+  if (fenKey && fenKey !== gameFlowLastLosingEvalKey) {
+    if (!gameFlowLosingSince) gameFlowLosingSince = now();
+    gameFlowLosingConfirmations += 1;
+    gameFlowLastLosingEvalKey = fenKey;
+  }
+}
+
+function recordGameFlowPosition(fen) {
+  const key = window.CSEGameFlow?.getRepetitionKey?.(fen);
+  if (!key || key === gameFlowLastRecordedPosition) return;
+  gameFlowLastRecordedPosition = key;
+  gameFlowPositionCounts.set(key, (gameFlowPositionCounts.get(key) || 0) + 1);
+}
+
+function handleGameFlowDrawResponse() {
+  const accept = getGameFlowAction('accept-draw');
+  const decline = getGameFlowAction('decline-draw');
+  const offerToken = accept?.token || decline?.token;
+  if (!offerToken) {
+    gameFlowHandledDrawToken = null;
+    return false;
+  }
+  if (offerToken === gameFlowHandledDrawToken) return true;
+  const decision = window.CSEGameFlow?.decideDrawResponse?.({
+    playerCp: gameFlowLastEval.cp,
+    playerMate: gameFlowLastEval.mate,
+    settings: gameFlowSettings,
+  });
+  if (!decision || decision.action === 'wait') {
+    setGameFlowStatus(decision?.reason || 'Patta in attesa di valutazione', 'waiting');
+    return true;
+  }
+  const target = decision.action === 'accept' ? accept : decline;
+  if (!target) {
+    setGameFlowStatus(`${decision.reason}: controllo non trovato`, 'warning');
+    return true;
+  }
+  if (clickGameFlowAction(target, decision.reason, decision.action === 'accept' ? 'success' : 'decision')) {
+    gameFlowHandledDrawToken = offerToken;
+  }
+  return true;
+}
+
+function handleGameFlowDrawOffer(fen) {
+  const key = window.CSEGameFlow?.getRepetitionKey?.(fen);
+  const decision = window.CSEGameFlow?.decideDrawOffer?.({
+    repetitionCount: key ? gameFlowPositionCounts.get(key) || 0 : 0,
+    halfmoveClock: window.CSEGameFlow?.getHalfmoveClock?.(fen) || 0,
+    pieceCount: countFenPieces(fen),
+    playerCp: gameFlowLastEval.cp,
+    playerMate: gameFlowLastEval.mate,
+    alreadyOffered: gameFlowDrawOffered,
+    settings: gameFlowSettings,
+  });
+  if (decision?.action !== 'offer') return false;
+  const action = getGameFlowAction('offer-draw');
+  if (!action) {
+    setGameFlowStatus(`${decision.reason}: controllo non trovato`, 'warning');
+    return true;
+  }
+  if (clickGameFlowAction(action, decision.reason, 'decision')) gameFlowDrawOffered = true;
+  return true;
+}
+
+function handleGameFlowResign() {
+  if (gameFlowResigned) return false;
+  if (gameFlowPendingResignConfirmation) {
+    const confirm = getGameFlowAction('confirm-resign');
+    if (confirm && clickGameFlowAction(confirm, gameFlowStatus, 'danger')) {
+      gameFlowResigned = true;
+      gameFlowPendingResignConfirmation = 0;
+      return true;
+    }
+    if (now() - gameFlowPendingResignConfirmation > 5000) gameFlowPendingResignConfirmation = 0;
+    return true;
+  }
+  const decision = window.CSEGameFlow?.decideResign?.({
+    playerCp: gameFlowLastEval.cp,
+    playerMate: gameFlowLastEval.mate,
+    stableForMs: gameFlowLosingSince ? now() - gameFlowLosingSince : 0,
+    confirmations: gameFlowLosingConfirmations,
+    opponentClockSec: getOpponentClockSecondsRemaining(),
+    settings: gameFlowSettings,
+  });
+  if (!decision) return false;
+  if (decision.action === 'hold') {
+    if (gameFlowLosingSince) {
+      setGameFlowStatus(decision.reason, 'decision');
+      return true;
+    }
+    return false;
+  }
+  if (decision.action === 'wait') {
+    setGameFlowStatus(decision.reason, 'waiting');
+    return true;
+  }
+  const resign = getGameFlowAction('resign');
+  if (!resign) {
+    setGameFlowStatus(`${decision.reason}: controllo non trovato`, 'warning');
+    return true;
+  }
+  if (clickGameFlowAction(resign, decision.reason, 'danger')) gameFlowPendingResignConfirmation = now();
+  return true;
+}
+
+function handleGameFlowRematch() {
+  const action = getGameFlowAction('accept-rematch');
+  if (!action || action.token === gameFlowHandledRematchToken) return false;
+  const decision = window.CSEGameFlow?.decideRematch?.({
+    acceptedCount: gameFlowAcceptedRematches,
+    settings: gameFlowSettings,
+  });
+  gameFlowHandledRematchToken = action.token;
+  if (decision?.action !== 'accept') {
+    setGameFlowStatus(decision?.reason || 'Rivincita ignorata', 'decision');
+    return true;
+  }
+  if (clickGameFlowAction(action, decision.reason, 'success')) gameFlowAcceptedRematches += 1;
+  return true;
+}
+
+function isGameFlowGameOver() {
+  if (getGameFlowAction('accept-rematch')) return true;
+  const selectors = ['[data-cy*="game-over"]', '[class*="game-over"]', '[class*="post-game"]'];
+  return selectors.some(selector => Array.from(document.querySelectorAll(selector)).some(isElementRenderable));
+}
+
+function performGameFlowTick() {
+  if (!isGameFlowEnabled) return;
+  const token = getToxicChatGameToken();
+  if (token !== gameFlowGameToken) resetGameFlowGameState(token);
+  if (!token || !(isOnlineGameContext() || isComputerGameContext())) {
+    setGameFlowStatus('In attesa di una partita', 'idle');
+    return;
+  }
+  const ply = getReliablePlyCount();
+  if (Number.isInteger(ply) && Number.isInteger(gameFlowLastPly) && ply < gameFlowLastPly) {
+    resetGameFlowGameState(token);
+  }
+  if (Number.isInteger(ply)) gameFlowLastPly = ply;
+  const fen = getFenFromPage() || lastEvalFen;
+  if (fen) recordGameFlowPosition(fen);
+  if (isGameFlowGameOver()) {
+    const handled = handleGameFlowRematch();
+    const hasRecentDecision = gameFlowStatusKind !== 'idle' && now() - gameFlowStatusUpdatedAt < 8000;
+    if (!handled && !hasRecentDecision) setGameFlowStatus('Partita terminata', 'idle');
+    return;
+  }
+  gameFlowHandledRematchToken = null;
+  if (handleGameFlowDrawResponse()) return;
+  if (handleGameFlowResign()) return;
+  const playerSide = getPlayerSide(getBoardElement());
+  const turn = normalizeTurn(String(fen || '').split(/\s+/)[1] || '');
+  if (fen && playerSide && turn === playerSide && handleGameFlowDrawOffer(fen)) return;
+  if (gameFlowStatusKind === 'idle' || now() - gameFlowStatusUpdatedAt >= 8000) {
+    setGameFlowStatus('Monitoraggio partita', 'idle');
+  }
+}
+
+function startGameFlowTicker() {
+  if (gameFlowTickInterval) return;
+  performGameFlowTick();
+  gameFlowTickInterval = setInterval(performGameFlowTick, 500);
+}
+
+function stopGameFlowTicker() {
+  if (gameFlowTickInterval) clearInterval(gameFlowTickInterval);
+  gameFlowTickInterval = null;
+  resetGameFlowGameState(null);
 }
 
 function logDetectedPlayerColor(boardEl = getBoardElement()) {
@@ -2073,6 +2443,10 @@ function updateAutomoveModeUI() {
 
 function getAutomoveModeLabel(mode = automoveMode) {
   return mode === 'human' ? 'Human' : mode === 'legit' ? 'Legit' : 'Blatant';
+}
+
+function getAutomoveModeCssClass(mode = automoveMode) {
+  return mode === 'legit' ? 'cse-mode-legit' : mode === 'blatant' ? 'cse-mode-blatant' : 'cse-mode-human';
 }
 
 function resetAutomoveTimingState(clearLast = false) {
@@ -4460,6 +4834,7 @@ function updateEvalBarDisplay(result) {
   lastEvalPvLines = Array.isArray(result.pvLines) ? result.pvLines.slice(0, 4) : [];
   lastEvalMate = Number.isFinite(result.mate) ? result.mate : null;
   setBestMove(result.bestMove);
+  registerGameFlowEvaluation(result, lastEvalFen);
 
   let whitePct;
   let label;
@@ -4499,9 +4874,11 @@ function updateEvalBarDisplay(result) {
 }
 const cseGuiState = {
   activeTab: 'ALL',
-  favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, ToxicChat: false, GameInsights: false, SuggestMove: false, EvaluationBar: false, GUI: false },
+  favorites: { AutoMove: false, PuzzleRush: false, AutoPlay: false, GameFlow: false, ToxicChat: false, GameInsights: false, SuggestMove: false, EvaluationBar: false, GUI: false },
   openSettings: null,
   settingsSection: 'general',
+  blockcraftCategory: 'ALL',
+  blockcraftView: 'grid',
   verdantSections: { automation: true, analysis: true, interface: true, security: false, themes: true },
 };
 
@@ -4515,6 +4892,7 @@ function applySavedGuiAndModuleState() {
       AutoMove: !!saved.favorites.AutoMove,
       PuzzleRush: !!saved.favorites.PuzzleRush,
       AutoPlay: !!saved.favorites.AutoPlay,
+      GameFlow: !!saved.favorites.GameFlow,
       ToxicChat: !!saved.favorites.ToxicChat,
       GameInsights: !!saved.favorites.GameInsights,
       SuggestMove: !!saved.favorites.SuggestMove,
@@ -4538,6 +4916,7 @@ function applySavedGuiAndModuleState() {
     isAutomoveEnabled = !!saved.modules.AutoMove;
     isPuzzleRushEnabled = !!saved.modules.PuzzleRush;
     isAutoPlayEnabled = !!saved.modules.AutoPlay;
+    isGameFlowEnabled = !!saved.modules.GameFlow;
     isToxicChatEnabled = !!saved.modules.ToxicChat;
     isGameInsightsEnabled = !!saved.modules.GameInsights;
     arrowsEnabled = !!saved.modules.SuggestMove;
@@ -4566,6 +4945,9 @@ function applySavedGuiAndModuleState() {
     if (typeof saved.settings.toxicChatMessage === 'string') toxicChatMessage = saved.settings.toxicChatMessage;
     toxicChatSendOnStart = !!saved.settings.toxicChatSendOnStart;
     toxicChatSendOnEnd = saved.settings.toxicChatSendOnEnd !== false;
+    if (saved.settings.gameFlow && typeof saved.settings.gameFlow === 'object') {
+      gameFlowSettings = window.CSEGameFlow?.normalizeSettings?.(saved.settings.gameFlow) || gameFlowSettings;
+    }
     if (saved.settings.evalBarDisplayMode === 'percent' || saved.settings.evalBarDisplayMode === 'bar') {
       evalBarDisplayMode = saved.settings.evalBarDisplayMode;
     }
@@ -4664,6 +5046,13 @@ function getSavedEvalBarPosition() {
   return { left: Math.round(p.left), top: Math.round(p.top) };
 }
 
+function getSavedGuiPosition() {
+  const saved = cseReadState();
+  const p = saved?.guiPosition;
+  if (!p || !Number.isFinite(p.left) || !Number.isFinite(p.top)) return null;
+  return { left: Math.round(p.left), top: Math.round(p.top) };
+}
+
 function clampToViewport(el, left, top) {
   const maxLeft = Math.max(0, window.innerWidth - el.offsetWidth);
   const maxTop = Math.max(0, window.innerHeight - el.offsetHeight);
@@ -4674,7 +5063,7 @@ function clampToViewport(el, left, top) {
 }
 
 function isEvaluationEngineNeeded() {
-  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled || isGameInsightsEnabled);
+  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled || isGameInsightsEnabled || isGameFlowEnabled);
 }
 
 function resetStockfishFailureTracking() {
@@ -4795,9 +5184,10 @@ function getActiveModuleHudEntries() {
   if (isAutomoveEnabled) {
     const timer = getAutomoveTimingText();
     const modeLabel = getAutomoveModeLabel();
+    const modeClass = getAutomoveModeCssClass();
     entries.push({
       key: `AutoMove|${modeLabel}|${timer}`,
-      html: `AutoMove <span class="cse-gui-hud-mode">[${modeLabel}]</span>${timer ? ` <span class="cse-gui-hud-timer">${timer}</span>` : ''}`,
+      html: `AutoMove <span class="cse-gui-hud-mode ${modeClass}">[${modeLabel}]</span>${timer ? ` <span class="cse-gui-hud-timer">${timer}</span>` : ''}`,
     });
   }
   if (isPuzzleRushEnabled) {
@@ -4863,6 +5253,12 @@ function toggleCseGuiModule(mod) {
     setAutomoveEnabled(!isAutomoveEnabled);
     return;
   }
+  if (isGameFlowEnabled) {
+    entries.push({
+      key: `GameFlow|${gameFlowStatusKind}|${gameFlowStatus}`,
+      html: `GameFlow <span class="cse-gui-hud-status cse-status-${gameFlowStatusKind}">${escapeHtmlAttr(gameFlowStatus)}</span>`,
+    });
+  }
   if (mod.id === 'PuzzleRush') {
     isPuzzleRushEnabled = !isPuzzleRushEnabled;
     clearPuzzleRushDepthFallback();
@@ -4880,6 +5276,10 @@ function toggleCseGuiModule(mod) {
     } else {
       startAutoPlayTicker();
     }
+  } else if (mod.id === 'GameFlow') {
+    isGameFlowEnabled = !isGameFlowEnabled;
+    if (isGameFlowEnabled) startGameFlowTicker();
+    else stopGameFlowTicker();
   } else if (mod.id === 'ToxicChat') {
     isToxicChatEnabled = !isToxicChatEnabled;
     if (!isToxicChatEnabled) {
@@ -4924,7 +5324,7 @@ function cseRenderVerdantGui(modal, allMods) {
     const isOpen = cseGuiState.openSettings === mod.id;
     return `
       <div class="cse-verdant-module ${isOpen ? 'is-settings-open' : ''}" data-module-id="${mod.id}" title="Right-click for ${mod.label} settings">
-        <span class="cse-verdant-module-name">${mod.label}${mod.id === 'AutoMove' ? ` <span class="cse-mc-mode-badge">[${getAutomoveModeLabel()}]</span>${isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-automove"></span>' : ''}` : ''}</span>
+        <span class="cse-verdant-module-name">${mod.label}${mod.id === 'AutoMove' ? ` <span class="cse-mc-mode-badge ${getAutomoveModeCssClass()}">[${getAutomoveModeLabel()}]</span>` : ''}</span>
         <button type="button" class="cse-verdant-toggle ${mod.active ? 'is-on' : ''}" data-module-toggle="${mod.id}" aria-label="Toggle ${mod.label}" aria-pressed="${mod.active ? 'true' : 'false'}"><span></span></button>
       </div>
       ${isOpen ? `<div class="cse-verdant-inline-settings-host" data-settings-host="${mod.id}"></div>` : ''}
@@ -4955,7 +5355,7 @@ function cseRenderVerdantGui(modal, allMods) {
   grid.className = 'cse-mc-grid cse-verdant-shell';
   grid.innerHTML = `
     <div class="cse-verdant-scroll">
-      ${renderSection('automation', 'Automation', ['AutoMove', 'AutoPlay', 'PuzzleRush'])}
+      ${renderSection('automation', 'Automation', ['AutoMove', 'AutoPlay', 'GameFlow', 'PuzzleRush'])}
       ${renderSection('analysis', 'Analysis', ['EvaluationBar', 'SuggestMove', 'GameInsights'])}
       ${renderSection('interface', 'Interface', ['GUI', 'ToxicChat'])}
       ${renderSection('security', 'Security', [], '<div class="cse-verdant-note">Player protection tools run on demand.</div>')}
@@ -5020,6 +5420,433 @@ function cseRenderVerdantGui(modal, allMods) {
   syncGuiHudPanel();
 }
 
+function cseBlockcraftIcon(kind, size = 34) {
+  const common = `width="${size}" height="${size}" viewBox="0 0 64 64" aria-hidden="true" focusable="false" shape-rendering="crispEdges"`;
+  const icons = {
+    grass: '<polygon points="32,4 58,17 32,31 6,17" fill="#75ad37"/><polygon points="6,17 32,31 32,59 6,44" fill="#79502d"/><polygon points="58,17 32,31 32,59 58,44" fill="#57371f"/><path d="M13 18h9v6h8v7h8v-7h8v-6h8v7L32 37 6 23v-6z" fill="#4d7f28"/><path d="M12 33h7v8h6v9h-6v-6h-7zm27 3h7v8h-7zm9-11h6v9h-6z" fill="#a26b32"/><path d="M21 8h14v6H21zm20 5h8v5h-8zM11 15h10v5H11z" fill="#9bce55"/>',
+    modules: '<polygon points="32,5 56,17 32,30 8,17" fill="#6da632"/><polygon points="8,17 32,30 32,57 8,44" fill="#6f4728"/><polygon points="56,17 32,30 32,57 56,44" fill="#3d5c32"/><path d="M8 17l24 13 24-13v8L32 38 8 25z" fill="#3f7927"/>',
+    star: '<path d="M32 5l7 17 18 2-14 12 5 18-16-10-16 10 5-18L7 24l18-2z" fill="#f4b62d"/><path d="M32 10v30l-13 8 5-14-11-8 15-2z" fill="#ffd258"/><path d="M39 22l18 2-14 12 5 18-16-10v-5l9 5-3-11 9-7-11-1z" fill="#b97812"/>',
+    gear: '<path d="M27 5h10l2 8 7-4 7 7-4 7 8 2v10l-8 2 4 7-7 7-7-4-2 8H27l-2-8-7 4-7-7 4-7-8-2V25l8-2-4-7 7-7 7 4z" fill="#8d9392"/><path d="M28 12h8l2 9 8 4v12l-8 6-12-1-8-8 1-11z" fill="#555b5a"/><rect x="25" y="25" width="14" height="14" fill="#171918"/><rect x="29" y="29" width="6" height="6" fill="#c8c9c4"/>',
+    bolt: '<path d="M34 4L15 35h14l-3 25 23-36H35z" fill="#ffc02e"/><path d="M32 8L20 31h13l-3 19 13-22H31z" fill="#ffe36c"/><path d="M29 35h-8l-4 6h11z" fill="#c87c0e"/>',
+    puzzle: '<path d="M32 7l24 22-24 24L8 31z" fill="#cbe8cd"/><path d="M32 7l24 22-6 6-18-17-18 18-6-5z" fill="#effff0"/><path d="M32 53l24-24-6 6-18-17v35z" fill="#92bd96"/><path d="M23 24h8v-7h8v8h7v8h-8v8h-8v-8h-7z" fill="#b4d5b7"/>',
+    play: '<path d="M16 8l39 24-39 24z" fill="#9ecb79"/><path d="M21 14l28 18-28 18z" fill="#e8f4dc"/><rect x="11" y="12" width="6" height="40" fill="#47752b"/>',
+    flow: '<path d="M10 13h18v8H18v12h21v-7l16 12-16 12v-8H10z" fill="#e9b84c"/><path d="M18 21h10v12h11v9H18z" fill="#fff0a5"/><path d="M39 26l16 12-16 12v-8h-7v-9h7z" fill="#c67b21"/>',
+    chat: '<path d="M8 10h48v34H29L17 55V44H8z" fill="#bb6c90"/><path d="M13 15h38v24H25l-8 7v-7h-4z" fill="#f2bdd5"/><rect x="20" y="24" width="6" height="6" fill="#7a3859"/><rect x="31" y="24" width="6" height="6" fill="#7a3859"/><rect x="42" y="24" width="6" height="6" fill="#7a3859"/>',
+    chart: '<path d="M8 52h48v5H8z" fill="#d8e0d8"/><rect x="12" y="35" width="8" height="17" fill="#68aee0"/><rect x="24" y="26" width="8" height="26" fill="#efcf63"/><rect x="36" y="18" width="8" height="34" fill="#8dcc74"/><rect x="48" y="8" width="8" height="44" fill="#d9e4df"/><path d="M12 37l13-10 9 4L51 12" fill="none" stroke="#79b7e8" stroke-width="4"/>',
+    down: '<path d="M27 6h10v31l10-10 7 7-22 22L10 34l7-7 10 10z" fill="#d8f2ce"/><path d="M27 6h5v43L14 31l-4 3 22 22V6z" fill="#6eaa52"/>',
+    bars: '<rect x="8" y="34" width="10" height="22" fill="#f3bd2f"/><rect x="22" y="25" width="10" height="31" fill="#f6d24e"/><rect x="36" y="14" width="10" height="42" fill="#f4a91f"/><rect x="50" y="5" width="7" height="51" fill="#ffe06e"/><path d="M8 34h10v5H8zm14-9h10v5H22zm14-11h10v5H36z" fill="#fff29a"/>',
+    gui: '<rect x="7" y="8" width="50" height="47" fill="#dce8e6"/><rect x="11" y="12" width="42" height="39" fill="#75b6dc"/><path d="M11 40l11-10 8 5 12-16 11 6v26H11z" fill="#bcd8e7"/><path d="M11 42l11-10 8 5 12-16 11 6" fill="none" stroke="#f4f5ed" stroke-width="3"/><rect x="7" y="8" width="50" height="5" fill="#8c9490"/>',
+    engine: '<polygon points="32,5 55,17 32,29 9,17" fill="#8a8f8c"/><polygon points="9,17 32,29 32,57 9,45" fill="#484d4c"/><polygon points="55,17 32,29 32,57 55,45" fill="#262a29"/><rect x="16" y="31" width="10" height="8" fill="#111"/><rect x="18" y="33" width="6" height="4" fill="#d85d22"/><rect x="38" y="37" width="10" height="8" fill="#111"/><rect x="40" y="39" width="6" height="4" fill="#e47c26"/>',
+    crate: '<rect x="9" y="10" width="46" height="46" fill="#6d431d"/><path d="M9 10h46v8H9zm8 8h7v38h-7zm23 0h7v38h-7z" fill="#b97a25"/><path d="M9 23h46v6H9zm0 18h46v6H9z" fill="#8e5b20"/><rect x="28" y="25" width="8" height="16" fill="#d39a35"/>',
+    torch: '<path d="M15 42l13-20 12 8-13 22z" fill="#98601e"/><path d="M30 25l8-16 13 8-10 15z" fill="#f3a925"/><path d="M38 9l5-7 6 10z" fill="#e97b22"/><path d="M11 44l8-5 8 13-8 6z" fill="#d6a43b"/>',
+    bell: '<path d="M18 45h28l-4-7V25c0-8-4-14-10-14S22 17 22 25v13z" fill="#e8a927"/><path d="M24 25c0-7 3-11 8-11v31H18l4-7V25z" fill="#ffd25a"/><rect x="14" y="45" width="36" height="6" fill="#a76613"/><path d="M27 52h10c-1 6-9 6-10 0z" fill="#e7a126"/>',
+    book: '<path d="M5 13h24c5 0 8 3 8 8v34c-3-4-7-5-13-5H5z" fill="#e8dfc8"/><path d="M59 13H35c-5 0-8 3-8 8v34c3-4 7-5 13-5h19z" fill="#cfc5aa"/><path d="M27 18h4v37h-4z" fill="#a33d26"/><path d="M9 20h14v3H9zm0 8h14v3H9zm32-8h14v3H41zm0 8h14v3H41z" fill="#938b78"/>',
+    grid: '<rect x="9" y="9" width="17" height="17" fill="#81cf39"/><rect x="38" y="9" width="17" height="17" fill="#81cf39"/><rect x="9" y="38" width="17" height="17" fill="#81cf39"/><rect x="38" y="38" width="17" height="17" fill="#81cf39"/>',
+    list: '<rect x="8" y="10" width="8" height="8" fill="#c99c48"/><rect x="22" y="11" width="34" height="6" fill="#c99c48"/><rect x="8" y="28" width="8" height="8" fill="#c99c48"/><rect x="22" y="29" width="34" height="6" fill="#c99c48"/><rect x="8" y="46" width="8" height="8" fill="#c99c48"/><rect x="22" y="47" width="34" height="6" fill="#c99c48"/>',
+  };
+  return `<svg ${common}>${icons[kind] || icons.gear}</svg>`;
+}
+
+function cseBlockcraftModuleMeta(id) {
+  const data = {
+    AutoMove: ['bolt', 'MOVEMENT', 'Automatically plays the best moves based on the position.'],
+    PuzzleRush: ['puzzle', 'PUZZLES', 'Solves puzzles faster by guiding you to the best solution.'],
+    AutoPlay: ['play', 'GAMEPLAY', 'Automatically plays entire games with customizable settings.'],
+    GameFlow: ['flow', 'UTILITY', 'Handles draws, resignations and rematches using stable engine decisions.'],
+    ToxicChat: ['chat', 'UTILITY', 'Sends your configured chat message at selected game moments.'],
+    GameInsights: ['chart', 'ANALYTICS', 'Analyzes every move and provides accurate stats and insights.'],
+    SuggestMove: ['down', 'GAMEPLAY', 'Suggests the best move using the current engine evaluation.'],
+    EvaluationBar: ['bars', 'UI', 'Displays a classic evaluation bar on the side of the board.'],
+    GUI: ['gui', 'UI', 'Customizes the layout and behavior of the in-game interface.'],
+  };
+  return data[id] || ['gear', 'MISC', 'Module settings and controls.'];
+}
+
+function cseRenderBlockcraftGui(modal, allMods) {
+  const tab = cseGuiState.activeTab;
+  modal.classList.add('cse-blockcraft-window');
+  modal.classList.remove('cse-verdant-window');
+  modal.querySelectorAll('.cse-mc-tab').forEach(button => {
+    const active = button.dataset.tab === tab;
+    const config = button.dataset.tab === 'ALL'
+      ? ['modules', 'ALL MODULES']
+      : button.dataset.tab === 'FAVORITE'
+        ? ['star', 'FAVORITES']
+        : ['gear', 'SETTINGS'];
+    button.innerHTML = `${cseBlockcraftIcon(config[0], 25)}<span>${config[1]}</span>`;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+
+  const category = cseGuiState.blockcraftCategory || 'ALL';
+  const favoritesOnly = tab === 'FAVORITE';
+  const visibleMods = allMods.filter(mod => {
+    if (favoritesOnly && !cseGuiState.favorites[mod.id]) return false;
+    const meta = cseBlockcraftModuleMeta(mod.id);
+    if (category === 'ALL') return true;
+    if (category === 'GAMEPLAY') return meta[1] === 'GAMEPLAY' || meta[1] === 'PUZZLES';
+    return meta[1] === category;
+  });
+  const cardMarkup = visibleMods.map(mod => {
+    const [icon, group, description] = cseBlockcraftModuleMeta(mod.id);
+    const isFav = !!cseGuiState.favorites[mod.id];
+    return `
+      <article class="cse-bc-card" data-module-id="${mod.id}">
+        <div class="cse-bc-card-head">
+          <span class="cse-bc-module-icon">${cseBlockcraftIcon(icon, 42)}</span>
+          <span class="cse-bc-module-copy"><b>${mod.label === 'GUI' ? 'GUI Customizer' : mod.label}</b><small>${group}</small></span>
+          <button type="button" class="cse-bc-switch ${mod.active ? 'is-on' : ''}" data-bc-toggle="${mod.id}" aria-label="Toggle ${mod.label}" aria-pressed="${mod.active ? 'true' : 'false'}"><span></span></button>
+        </div>
+        <p>${description}</p>
+        <div class="cse-bc-card-actions">
+          <button type="button" class="cse-bc-square cse-bc-favorite ${isFav ? 'is-on' : ''}" data-bc-favorite="${mod.id}" aria-label="${isFav ? 'Remove from favorites' : 'Add to favorites'}">${cseBlockcraftIcon('star', 23)}</button>
+          ${mod.hasSettings
+            ? `<button type="button" class="cse-bc-square" data-bc-settings="${mod.id}" aria-label="${mod.label} settings">${cseBlockcraftIcon('gear', 23)}</button>`
+            : `<button type="button" class="cse-bc-square is-disabled" disabled aria-label="No settings for ${mod.label}">${cseBlockcraftIcon('gear', 23)}</button>`}
+        </div>
+      </article>`;
+  }).join('');
+  const emptyMarkup = '<div class="cse-bc-empty">NO MODULES IN THIS CATEGORY</div>';
+  const categories = ['ALL', 'GAMEPLAY', 'MOVEMENT', 'UTILITY', 'UI', 'ANALYTICS', 'MISC'];
+  const grid = modal.querySelector('#cse-mc-grid');
+  grid.className = 'cse-mc-grid cse-bc-shell';
+  grid.innerHTML = `
+    <aside class="cse-bc-sidebar">
+      <div class="cse-bc-theme-plaque"><b>BLOCKCRAFT CLASSIC</b><small>(MINECRAFT STYLE)</small></div>
+      <nav class="cse-bc-nav" aria-label="Blockcraft navigation">
+        <button type="button" class="${tab === 'ALL' ? 'is-active' : ''}" data-bc-tab="ALL">${cseBlockcraftIcon('grass', 44)}<span><b>ALL MODULES</b><small>Browse all modules</small></span><i>›</i></button>
+        <button type="button" class="${tab === 'FAVORITE' ? 'is-active' : ''}" data-bc-tab="FAVORITE">${cseBlockcraftIcon('star', 42)}<span><b>FAVORITES</b><small>Your favorite modules</small></span></button>
+        <button type="button" data-bc-section="stockfish">${cseBlockcraftIcon('engine', 42)}<span><b>ENGINES</b><small>Stockfish and Maia</small></span></button>
+        <button type="button" data-bc-section="general">${cseBlockcraftIcon('crate', 42)}<span><b>GENERAL</b><small>Application settings</small></span></button>
+        <button type="button" data-bc-section="appearance">${cseBlockcraftIcon('torch', 42)}<span><b>APPEARANCE</b><small>Theme and UI</small></span></button>
+        <button type="button" data-bc-section="notifications">${cseBlockcraftIcon('bell', 42)}<span><b>NOTIFICATIONS</b><small>Alerts and sounds</small></span></button>
+        <button type="button" data-bc-section="about">${cseBlockcraftIcon('book', 42)}<span><b>ABOUT</b><small>Version and credits</small></span></button>
+      </nav>
+      <div class="cse-bc-app-info"><b>APPLICATION INFO</b><span>▣ Maia Chess v1.0.0</span><span>▣ Built for players.</span><span>▣ Optimized for performance.</span><span>▣ Enjoy the game!</span><small>© 2026 Maia Chess Team</small></div>
+    </aside>
+    <main class="cse-bc-main">
+      <section class="cse-bc-heading">
+        <span class="cse-bc-heading-icon">${cseBlockcraftIcon(favoritesOnly ? 'star' : 'grass', 57)}</span>
+        <span><h2>${favoritesOnly ? 'FAVORITES' : 'ALL MODULES'}</h2><p>${favoritesOnly ? 'Your saved modules in one place.' : 'Browse and manage all available modules.'}</p></span>
+        <div class="cse-bc-view">
+          <button type="button" class="${cseGuiState.blockcraftView === 'grid' ? 'is-active' : ''}" data-bc-view="grid">${cseBlockcraftIcon('grid', 26)}</button>
+          <button type="button" class="${cseGuiState.blockcraftView === 'list' ? 'is-active' : ''}" data-bc-view="list">${cseBlockcraftIcon('list', 26)}</button>
+        </div>
+      </section>
+      <section class="cse-bc-filters">
+        <div>${categories.map(item => `<button type="button" class="${category === item ? 'is-active' : ''}" data-bc-category="${item}">${item}</button>`).join('')}</div>
+        <span>${visibleMods.length} MODULE${visibleMods.length === 1 ? '' : 'S'}</span>
+      </section>
+      <section class="cse-bc-cards ${cseGuiState.blockcraftView === 'list' ? 'is-list' : ''}">${cardMarkup || emptyMarkup}</section>
+      <footer class="cse-bc-footer"><div><button type="button" disabled>‹</button><b>1</b><button type="button" disabled>›</button></div><span>Show per page: <strong>16⌄</strong></span></footer>
+    </main>`;
+
+  grid.querySelectorAll('[data-bc-tab]').forEach(button => button.addEventListener('click', () => {
+    cseGuiState.activeTab = button.dataset.bcTab;
+    cseGuiState.blockcraftCategory = 'ALL';
+    cseSaveState();
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-bc-section]').forEach(button => button.addEventListener('click', () => {
+    cseGuiState.activeTab = 'SETTINGS';
+    cseGuiState.settingsSection = button.dataset.bcSection;
+    cseSaveState();
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-bc-category]').forEach(button => button.addEventListener('click', () => {
+    cseGuiState.blockcraftCategory = button.dataset.bcCategory;
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-bc-view]').forEach(button => button.addEventListener('click', () => {
+    cseGuiState.blockcraftView = button.dataset.bcView === 'list' ? 'list' : 'grid';
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-bc-toggle]').forEach(button => button.addEventListener('click', () => {
+    const mod = allMods.find(item => item.id === button.dataset.bcToggle);
+    if (mod) toggleCseGuiModule(mod);
+  }));
+  grid.querySelectorAll('[data-bc-favorite]').forEach(button => button.addEventListener('click', () => {
+    const id = button.dataset.bcFavorite;
+    cseGuiState.favorites[id] = !cseGuiState.favorites[id];
+    cseSaveState();
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-bc-settings]').forEach(button => button.addEventListener('click', () => {
+    cseGuiState.openSettings = button.dataset.bcSettings;
+    cseRenderSettingsPanel(button.dataset.bcSettings);
+  }));
+  grid.querySelectorAll('.cse-bc-card[data-module-id]').forEach(card => card.addEventListener('contextmenu', event => {
+    const mod = allMods.find(item => item.id === card.dataset.moduleId);
+    if (!mod?.hasSettings) return;
+    event.preventDefault();
+    cseGuiState.openSettings = mod.id;
+    cseRenderSettingsPanel(mod.id);
+  }));
+  cseSyncAnimatedRanges(grid);
+  syncGuiHudPanel();
+}
+
+function cseRenderBlockcraftGlobalSettings(modal) {
+  const section = cseGuiState.settingsSection || 'general';
+  cseGuiState.openSettings = null;
+  const settingsOverlay = modal.querySelector('#cse-mc-settings-overlay');
+  if (settingsOverlay) {
+    settingsOverlay.style.display = 'none';
+    settingsOverlay.classList.remove('is-open', 'is-closing');
+  }
+  const activeEngineId = getActiveEvalEngineId();
+  const providerLabel = getActiveEvalEngineLabel(activeEngineId);
+  const isLocalProvider = stockfishProvider === 'local';
+  const failureFor = stockfishFailureSinceAt ? formatAgo(stockfishFailureSinceAt) : '-';
+  const noFenFor = stockfishNoFenSinceAt ? formatAgo(stockfishNoFenSinceAt) : '-';
+  const lastSuccess = formatAgo(stockfishLastSuccessAt);
+  const lastReload = formatAgo(stockfishLastReloadAt);
+  const sfStatus = stockfishFailureStreak === 0 ? 'HEALTHY' : 'DEGRADED';
+  const sectionMeta = {
+    general: ['gear', 'SETTINGS', 'Configure Maia Chess to match your preferences.'],
+    stockfish: ['engine', 'ENGINES', 'Configure and monitor Stockfish and Maia.'],
+    appearance: ['torch', 'APPEARANCE', 'Customize the Blockcraft interface and visual behavior.'],
+    notifications: ['bell', 'NOTIFICATIONS', 'Choose which in-client alerts are displayed.'],
+    about: ['book', 'ABOUT', 'Version, engine and storage information.'],
+  }[section] || ['gear', 'SETTINGS', 'Configure Maia Chess to match your preferences.'];
+
+  modal.classList.add('cse-blockcraft-window');
+  modal.classList.remove('cse-verdant-window');
+  modal.querySelectorAll('.cse-mc-tab').forEach(button => {
+    const active = button.dataset.tab === 'SETTINGS';
+    const config = button.dataset.tab === 'ALL'
+      ? ['modules', 'ALL MODULES']
+      : button.dataset.tab === 'FAVORITE'
+        ? ['star', 'FAVORITES']
+        : ['gear', 'SETTINGS'];
+    button.innerHTML = `${cseBlockcraftIcon(config[0], 25)}<span>${config[1]}</span>`;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+
+  const providerMarkup = `
+    <section class="cse-bc-global-box cse-bc-provider-box">
+      <h3>ENGINE PROVIDER</h3>
+      <p>Choose how Stockfish is used outside Maia legit mode.</p>
+      <div class="cse-bc-provider-options">
+        <button type="button" class="cse-bc-provider ${isLocalProvider ? 'is-active' : ''}" data-provider="local">
+          <i></i><span>${cseBlockcraftIcon('engine', 27)}<b>Local Stockfish</b><em>RECOMMENDED</em><small>Run Stockfish locally on your device.<br>No internet required.</small></span>
+        </button>
+        <button type="button" class="cse-bc-provider ${!isLocalProvider ? 'is-active' : ''}" data-provider="api">
+          <i></i><span>${cseBlockcraftIcon('modules', 27)}<b>Stockfish via API</b><small>Use a remote Stockfish engine via API.<br>Requires internet connection.</small></span>
+        </button>
+      </div>
+      <div class="cse-bc-global-note">ⓘ AutoMove Legit uses Maia ${normalizeMaiaElo(maiaElo)}; Blatant and Puzzle Rush use Stockfish.</div>
+    </section>`;
+
+  const generalContent = `
+    <div class="cse-bc-global-columns">
+      <div class="cse-bc-global-primary">
+        ${providerMarkup}
+        <section class="cse-bc-global-box">
+          <h3>UI CUSTOMIZATION</h3>
+          <div class="cse-bc-global-split">
+            <div>
+              <div class="cse-bc-setting-row"><span><b>Accent color</b><small>Choose the interface highlight.</small></span><div class="cse-bc-color-row">${['emerald','cyan','violet','rose','gold'].map(color => `<button type="button" data-ui-accent="${color}" class="cse-bc-color-${color} ${uiAccent === color ? 'is-active' : ''}" aria-label="${color}"></button>`).join('')}</div></div>
+              <div class="cse-bc-setting-row"><span><b>Interface density</b><small>Adjust spacing between elements.</small></span><select id="cse-ui-density" class="cse-bc-select"><option value="compact" ${uiDensity === 'compact' ? 'selected' : ''}>Compact</option><option value="comfortable" ${uiDensity === 'comfortable' ? 'selected' : ''}>Normal</option><option value="spacious" ${uiDensity === 'spacious' ? 'selected' : ''}>Spacious</option></select></div>
+            </div>
+            <div>
+              <label class="cse-bc-setting-row"><span><b>Animations</b><small>Enable interface transitions and feedback.</small></span><input class="cse-bc-check" id="cse-ui-motion" type="checkbox" ${uiMotionEnabled ? 'checked' : ''}></label>
+              <div class="cse-bc-setting-row"><span><b>Current style</b><small>Pixelated Blockcraft component pack.</small></span><strong class="cse-bc-value">PIXELATED</strong></div>
+            </div>
+          </div>
+        </section>
+        <section class="cse-bc-global-box">
+          <h3>BEHAVIOR</h3>
+          <label class="cse-bc-setting-row"><span><b>Minimize to tray</b><small>Close button minimizes the application to the system tray.</small></span><input class="cse-bc-check" id="cse-general-minimize-tray" type="checkbox" ${generalMinimizeToTray ? 'checked' : ''}></label>
+        </section>
+      </div>
+      <aside class="cse-bc-global-secondary">
+        <section class="cse-bc-global-box"><h3>LANGUAGE</h3><div class="cse-bc-side-control"><span>${cseBlockcraftIcon('grass', 27)}<b>Application language.</b></span><select id="cse-general-language" class="cse-bc-select"><option value="en" ${generalLanguage === 'en' ? 'selected' : ''}>English</option><option value="it" ${generalLanguage === 'it' ? 'selected' : ''}>Italiano</option></select></div></section>
+        <section class="cse-bc-global-box"><h3>NUMBERS FORMAT</h3><div class="cse-bc-side-control"><span># <b>Choose how numbers are formatted.</b></span><select id="cse-general-numbers" class="cse-bc-select"><option value="default" ${generalNumbersFormat === 'default' ? 'selected' : ''}>Default (1,234.56)</option><option value="eu" ${generalNumbersFormat === 'eu' ? 'selected' : ''}>European (1.234,56)</option></select></div></section>
+        <section class="cse-bc-global-box"><h3>ACTIVE ENGINE</h3><div class="cse-bc-side-summary">${cseBlockcraftIcon('engine', 42)}<span><b>${providerLabel}</b><small>Current evaluation provider</small></span></div></section>
+      </aside>
+    </div>`;
+
+  const enginesContent = `
+    <div class="cse-bc-global-columns">
+      <div class="cse-bc-global-primary">
+        ${providerMarkup}
+        <section class="cse-bc-global-box">
+          <h3>ENGINE MONITORING</h3>
+          <label class="cse-bc-setting-row"><span><b>Auto reload Stockfish</b><small>Reload every 10 seconds when evaluation is stuck.</small></span><input class="cse-bc-check" id="cse-stockfish-auto-reload" type="checkbox" ${stockfishAutoReloadEnabled ? 'checked' : ''}></label>
+          <div class="cse-bc-setting-row"><span><b>Reload engine now</b><small>Restart the current Stockfish connection.</small></span><button type="button" class="cse-bc-action" id="cse-stockfish-reload-now">↻ RELOAD</button></div>
+        </section>
+      </div>
+      <aside class="cse-bc-global-secondary">
+        <section class="cse-bc-global-box">
+          <h3>ENGINE STATUS</h3>
+          <div class="cse-bc-stat-grid">
+            <span><small>Status</small><b class="${stockfishFailureStreak === 0 ? 'is-good' : 'is-bad'}">${sfStatus}</b></span>
+            <span><small>Failure streak</small><b>${stockfishFailureStreak}</b></span>
+            <span><small>Failing for</small><b>${failureFor}</b></span>
+            <span><small>No position for</small><b>${noFenFor}</b></span>
+            <span><small>Last success</small><b>${lastSuccess}</b></span>
+            <span><small>Last reload</small><b>${lastReload}</b></span>
+          </div>
+        </section>
+        <section class="cse-bc-global-box"><h3>MAIA</h3><div class="cse-bc-side-summary">${cseBlockcraftIcon('grass', 42)}<span><b>Maia ${normalizeMaiaElo(maiaElo)}</b><small>Used by AutoMove Legit mode</small></span></div></section>
+      </aside>
+    </div>`;
+
+  const themes = [
+    ['aurora', 'Maia Classic', 'Modern emerald interface'],
+    ['blockforge', 'Blockcraft Classic', 'Pixel grass and stone'],
+    ['voidos', 'Voidtech Neon', 'Angular cyan overlay'],
+    ['claude', 'Claude', 'Warm minimal interface'],
+    ['verdant', 'Verdant', 'Compact dark client'],
+  ];
+  const appearanceContent = `
+    <div class="cse-bc-global-columns">
+      <div class="cse-bc-global-primary">
+        <section class="cse-bc-global-box">
+          <h3>INTERFACE THEME</h3>
+          <div class="cse-bc-theme-options">${themes.map(([id,label,copy]) => `<button type="button" class="${uiTheme === id ? 'is-active' : ''}" data-ui-theme="${id}"><span>${id === 'blockforge' ? cseBlockcraftIcon('grass', 37) : cseBlockcraftIcon(id === 'verdant' ? 'modules' : id === 'voidos' ? 'gear' : id === 'claude' ? 'book' : 'star', 34)}</span><b>${label}</b><small>${copy}</small><i>${uiTheme === id ? '✓' : ''}</i></button>`).join('')}</div>
+        </section>
+      </div>
+      <aside class="cse-bc-global-secondary">
+        <section class="cse-bc-global-box"><h3>ACCENT COLOR</h3><div class="cse-bc-color-row cse-bc-color-row-large">${['emerald','cyan','violet','rose','gold'].map(color => `<button type="button" data-ui-accent="${color}" class="cse-bc-color-${color} ${uiAccent === color ? 'is-active' : ''}" aria-label="${color}"></button>`).join('')}</div></section>
+        <section class="cse-bc-global-box"><h3>LAYOUT</h3><div class="cse-bc-side-control"><span>${cseBlockcraftIcon('grid', 26)}<b>Interface density</b></span><select id="cse-ui-density" class="cse-bc-select"><option value="compact" ${uiDensity === 'compact' ? 'selected' : ''}>Compact</option><option value="comfortable" ${uiDensity === 'comfortable' ? 'selected' : ''}>Normal</option><option value="spacious" ${uiDensity === 'spacious' ? 'selected' : ''}>Spacious</option></select></div><label class="cse-bc-setting-row"><span><b>Animations</b><small>Transitions and visual feedback.</small></span><input class="cse-bc-check" id="cse-ui-motion" type="checkbox" ${uiMotionEnabled ? 'checked' : ''}></label></section>
+        <section class="cse-bc-global-box"><h3>LIVE STYLE</h3><div class="cse-bc-mini-preview"><i></i><b>BLOCKCRAFT</b><span></span><span></span><button type="button" disabled>MODULE ACTIVE</button></div></section>
+      </aside>
+    </div>`;
+
+  const notificationRows = [
+    ['engineReady','Engine ready','The selected analysis engine is available.'],
+    ['gameFinished','Game finished','Show the final result and recap alert.'],
+    ['opponentMove','Opponent move','Notify when the opponent completes a move.'],
+    ['analysisWarning','Analysis warning','Highlight mistakes and blunders from Game Insights.'],
+    ['moduleUpdate','Module update','Confirm when a module is enabled or disabled.'],
+  ];
+  const notificationsContent = `
+    <div class="cse-bc-global-columns">
+      <div class="cse-bc-global-primary">
+        <section class="cse-bc-global-box"><h3>EVENT MATRIX</h3>${notificationRows.map(([key,label,copy]) => `<label class="cse-bc-setting-row"><span><b>${label}</b><small>${copy}</small></span><input class="cse-bc-check" type="checkbox" data-notification-key="${key}" ${uiNotifications[key] ? 'checked' : ''}></label>`).join('')}</section>
+      </div>
+      <aside class="cse-bc-global-secondary">
+        <section class="cse-bc-global-box"><h3>POSITION</h3><div class="cse-bc-side-control"><span>${cseBlockcraftIcon('bell', 28)}<b>Notification position</b></span><select id="cse-notification-position" class="cse-bc-select"><option value="bottom-right" ${notificationPosition === 'bottom-right' ? 'selected' : ''}>Bottom right</option><option value="bottom-left" ${notificationPosition === 'bottom-left' ? 'selected' : ''}>Bottom left</option><option value="top-right" ${notificationPosition === 'top-right' ? 'selected' : ''}>Top right</option><option value="top-left" ${notificationPosition === 'top-left' ? 'selected' : ''}>Top left</option></select></div></section>
+        <section class="cse-bc-global-box"><h3>INFORMATION</h3><div class="cse-bc-global-note">Alerts are saved locally and shown inside Chess.com.</div></section>
+      </aside>
+    </div>`;
+
+  const aboutContent = `
+    <div class="cse-bc-global-columns">
+      <div class="cse-bc-global-primary">
+        <section class="cse-bc-global-box cse-bc-about-hero"><span>${cseBlockcraftIcon('grass', 82)}</span><div><h3>MAIA CHESS</h3><b>Version 1.0.0</b><p>Analysis, automation and game insights in one configurable client.</p></div></section>
+        <section class="cse-bc-global-box"><h3>APPLICATION INFO</h3><div class="cse-bc-about-list"><span>Built for players.</span><span>Optimized for performance.</span><span>Settings stored locally in your browser.</span></div></section>
+      </div>
+      <aside class="cse-bc-global-secondary"><section class="cse-bc-global-box"><h3>SYSTEM</h3><div class="cse-bc-about-meta"><span>Engine provider <b>${providerLabel}</b></span><span>Interface shell <b>Blockcraft</b></span><span>State storage <b>Local</b></span><span>Motion <b>${uiMotionEnabled ? 'Enabled' : 'Disabled'}</b></span></div></section></aside>
+    </div>`;
+
+  const content = section === 'stockfish' ? enginesContent
+    : section === 'appearance' ? appearanceContent
+      : section === 'notifications' ? notificationsContent
+        : section === 'about' ? aboutContent
+          : generalContent;
+  const grid = modal.querySelector('#cse-mc-grid');
+  grid.className = 'cse-mc-grid cse-bc-shell';
+  grid.innerHTML = `
+    <aside class="cse-bc-sidebar">
+      <div class="cse-bc-theme-plaque"><b>BLOCKCRAFT CLASSIC</b><small>(MINECRAFT STYLE)</small></div>
+      <nav class="cse-bc-nav" aria-label="Blockcraft navigation">
+        <button type="button" data-bc-tab="ALL">${cseBlockcraftIcon('grass', 44)}<span><b>ALL MODULES</b><small>Browse all modules</small></span></button>
+        <button type="button" data-bc-tab="FAVORITE">${cseBlockcraftIcon('star', 42)}<span><b>FAVORITES</b><small>Your favorite modules</small></span></button>
+        <button type="button" class="${section === 'stockfish' ? 'is-active' : ''}" data-bc-section="stockfish">${cseBlockcraftIcon('engine', 42)}<span><b>ENGINES</b><small>Stockfish and Maia</small></span></button>
+        <button type="button" class="${section === 'general' ? 'is-active' : ''}" data-bc-section="general">${cseBlockcraftIcon('crate', 42)}<span><b>GENERAL</b><small>Application settings</small></span></button>
+        <button type="button" class="${section === 'appearance' ? 'is-active' : ''}" data-bc-section="appearance">${cseBlockcraftIcon('torch', 42)}<span><b>APPEARANCE</b><small>Theme and UI</small></span></button>
+        <button type="button" class="${section === 'notifications' ? 'is-active' : ''}" data-bc-section="notifications">${cseBlockcraftIcon('bell', 42)}<span><b>NOTIFICATIONS</b><small>Alerts and sounds</small></span></button>
+        <button type="button" class="${section === 'about' ? 'is-active' : ''}" data-bc-section="about">${cseBlockcraftIcon('book', 42)}<span><b>ABOUT</b><small>Version and credits</small></span></button>
+      </nav>
+      <div class="cse-bc-app-info"><b>APPLICATION INFO</b><span>▣ Maia Chess v1.0.0</span><span>▣ Built for players.</span><span>▣ Optimized for performance.</span><span>▣ Enjoy the game!</span><small>© 2026 Maia Chess Team</small></div>
+    </aside>
+    <main class="cse-bc-main cse-bc-settings-main">
+      <section class="cse-bc-heading"><span class="cse-bc-heading-icon">${cseBlockcraftIcon(sectionMeta[0], 55)}</span><span><h2>${sectionMeta[1]}</h2><p>${sectionMeta[2]}</p></span></section>
+      <div class="cse-bc-global-settings">${content}</div>
+    </main>`;
+
+  grid.querySelectorAll('[data-bc-tab]').forEach(button => button.addEventListener('click', () => {
+    cseGuiState.activeTab = button.dataset.bcTab;
+    cseSaveState();
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-bc-section]').forEach(button => button.addEventListener('click', () => {
+    cseGuiState.settingsSection = button.dataset.bcSection;
+    cseSaveState();
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-provider]').forEach(button => button.addEventListener('click', () => {
+    const provider = button.dataset.provider === 'api' ? 'api' : 'local';
+    if (provider === stockfishProvider) return;
+    stockfishProvider = provider;
+    reloadStockfishConnection('provider-change', true);
+    cseSaveState();
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-ui-theme]').forEach(button => button.addEventListener('click', () => {
+    uiTheme = ['aurora','blockforge','voidos','claude','verdant'].includes(button.dataset.uiTheme) ? button.dataset.uiTheme : 'blockforge';
+    applyUiTheme();
+    cseSaveState();
+    cseRenderGui();
+  }));
+  grid.querySelectorAll('[data-ui-accent]').forEach(button => button.addEventListener('click', () => {
+    uiAccent = ['emerald','cyan','violet','rose','gold'].includes(button.dataset.uiAccent) ? button.dataset.uiAccent : 'emerald';
+    applyUiTheme();
+    cseSaveState();
+    cseRenderGui();
+  }));
+  const density = grid.querySelector('#cse-ui-density');
+  if (density) density.addEventListener('change', () => {
+    uiDensity = ['compact','comfortable','spacious'].includes(density.value) ? density.value : 'comfortable';
+    applyUiTheme(); cseSaveState(); cseRenderGui();
+  });
+  const motion = grid.querySelector('#cse-ui-motion');
+  if (motion) motion.addEventListener('change', () => {
+    uiMotionEnabled = !!motion.checked; applyUiTheme(); cseSaveState();
+  });
+  const language = grid.querySelector('#cse-general-language');
+  if (language) language.addEventListener('change', () => {
+    generalLanguage = language.value === 'it' ? 'it' : 'en'; cseSaveState();
+  });
+  const numbers = grid.querySelector('#cse-general-numbers');
+  if (numbers) numbers.addEventListener('change', () => {
+    generalNumbersFormat = numbers.value === 'eu' ? 'eu' : 'default'; cseSaveState();
+  });
+  const minimize = grid.querySelector('#cse-general-minimize-tray');
+  if (minimize) minimize.addEventListener('change', () => {
+    generalMinimizeToTray = !!minimize.checked; cseSaveState();
+  });
+  const autoReload = grid.querySelector('#cse-stockfish-auto-reload');
+  if (autoReload) autoReload.addEventListener('change', () => {
+    stockfishAutoReloadEnabled = !!autoReload.checked; cseSaveState();
+  });
+  const reload = grid.querySelector('#cse-stockfish-reload-now');
+  if (reload) reload.addEventListener('click', () => {
+    reloadStockfishConnection('manual-ui', true); cseSaveState(); cseRenderGui();
+  });
+  const position = grid.querySelector('#cse-notification-position');
+  if (position) position.addEventListener('change', () => {
+    notificationPosition = ['bottom-right','bottom-left','top-right','top-left'].includes(position.value) ? position.value : 'bottom-right';
+    document.documentElement.dataset.cseNotificationPosition = notificationPosition;
+    if (document.body) document.body.dataset.cseNotificationPosition = notificationPosition;
+    const tray = document.getElementById('cse-toast-tray');
+    if (tray) tray.dataset.position = notificationPosition;
+    cseSaveState();
+  });
+  grid.querySelectorAll('[data-notification-key]').forEach(toggle => toggle.addEventListener('change', () => {
+    const key = toggle.dataset.notificationKey;
+    if (!Object.prototype.hasOwnProperty.call(uiNotifications, key)) return;
+    uiNotifications[key] = !!toggle.checked;
+    cseSaveState();
+  }));
+  cseSyncAnimatedRanges(grid);
+  syncGuiHudPanel();
+}
+
 function cseRenderGui() {
   const modal = document.getElementById('cse-mc-gui');
   if (!modal) return;
@@ -5031,16 +5858,23 @@ function cseRenderGui() {
     { id: 'AutoMove', label: 'AutoMove', active: isAutomoveEnabled, hasSettings: true },
     { id: 'PuzzleRush', label: 'Puzzle Rush', active: isPuzzleRushEnabled, hasSettings: true },
     { id: 'AutoPlay', label: 'AutoPlay', active: isAutoPlayEnabled, hasSettings: true },
+    { id: 'GameFlow', label: 'GameFlow', active: isGameFlowEnabled, hasSettings: true },
     { id: 'ToxicChat', label: 'Toxic Chat', active: isToxicChatEnabled, hasSettings: true },
     { id: 'GameInsights', label: 'Game Insights', active: isGameInsightsEnabled, hasSettings: false },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
   ];
+  if (uiTheme === 'blockforge') {
+    if (tab === 'SETTINGS') cseRenderBlockcraftGlobalSettings(modal);
+    else cseRenderBlockcraftGui(modal, allMods);
+    return;
+  }
   if (uiTheme === 'verdant') {
     cseRenderVerdantGui(modal, allMods);
     return;
   }
+  modal.classList.remove('cse-blockcraft-window');
   modal.classList.remove('cse-verdant-window');
   const logo = modal.querySelector('.cse-mc-logo');
   if (logo) logo.textContent = 'Chess Stats';
@@ -5431,6 +6265,10 @@ function cseRenderGui() {
         color: '#4ac0a8', bg: 'rgba(74,192,168,0.13)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>`
       },
+      GameFlow: {
+        color: '#e0aa45', bg: 'rgba(224,170,69,0.14)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h7v5h6"/><path d="M14 8l3 3-3 3"/><path d="M20 18h-7v-5H7"/><path d="M10 10l-3 3 3 3"/></svg>`
+      },
       ToxicChat: {
         color: '#cf5a87', bg: 'rgba(207,90,135,0.14)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>`
@@ -5460,6 +6298,7 @@ function cseRenderGui() {
       AutoMove: 'Automatic best moves',
       PuzzleRush: 'Solve puzzles faster',
       AutoPlay: 'Play full games automatically',
+      GameFlow: 'Manage draws, resignations and rematches',
       ToxicChat: 'Send auto chat message',
       GameInsights: 'Live move quality and recap',
       SuggestMove: 'Suggest the best moves',
@@ -5469,7 +6308,7 @@ function cseRenderGui() {
     };
     const icon = iconMap[mod.id] || { color: '#888', bg: 'rgba(136,136,136,0.12)', svg: '?' };
     const desc = descMap[mod.id] || '';
-    const isRunning = mod.active && (mod.id === 'AutoPlay' || mod.id === 'AutoMove' || mod.id === 'PuzzleRush' || mod.id === 'ToxicChat' || mod.id === 'GameInsights');
+    const isRunning = mod.active && (mod.id === 'AutoPlay' || mod.id === 'AutoMove' || mod.id === 'PuzzleRush' || mod.id === 'GameFlow' || mod.id === 'ToxicChat' || mod.id === 'GameInsights');
 
     card.innerHTML = `
       <div class="cse-mc-card-top">
@@ -5483,7 +6322,7 @@ function cseRenderGui() {
           </div>` : '<div class="cse-mc-dots cse-mc-dots-disabled" title="No settings"><span></span><span></span><span></span></div>'}
         </div>
       </div>
-      <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' ? ` <span class="cse-mc-mode-badge">[${getAutomoveModeLabel()}]</span>${isAutomoveEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-automove"></span>' : ''}` : ''}${mod.id === 'PuzzleRush' && isPuzzleRushEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-puzzlerush"></span>' : ''}${mod.id === 'AutoPlay' && isAutoPlayEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-autoplay"></span>' : ''}</div>
+      <div class="cse-mc-card-name">${mod.label}${mod.id === 'AutoMove' ? ` <span class="cse-mc-mode-badge ${getAutomoveModeCssClass()}">[${getAutomoveModeLabel()}]</span>` : ''}${mod.id === 'PuzzleRush' && isPuzzleRushEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-puzzlerush"></span>' : ''}${mod.id === 'AutoPlay' && isAutoPlayEnabled ? '<span class="cse-mc-timer" id="cse-mc-timer-autoplay"></span>' : ''}</div>
       <div class="cse-mc-card-desc">${desc}</div>
       ${isRunning ? '<div class="cse-mc-running"><span class="cse-mc-running-dot"></span>Running</div>' : ''}
       <div class="cse-mc-fav ${isFav ? 'cse-mc-fav-on' : ''}" data-id="${mod.id}" title="${isFav ? 'Remove from favorites' : 'Add to favorites'}">&#9733;</div>
@@ -5653,6 +6492,122 @@ function bindHotkeyCapture(overlayEl, inputId, onChange) {
   });
 }
 
+function cseBlockcraftSettingsMarkup(modId) {
+  const [icon, group, description] = cseBlockcraftModuleMeta(modId);
+  const enabled = {
+    AutoMove: isAutomoveEnabled,
+    PuzzleRush: isPuzzleRushEnabled,
+    AutoPlay: isAutoPlayEnabled,
+    GameFlow: isGameFlowEnabled,
+    ToxicChat: isToxicChatEnabled,
+    EvaluationBar: isEvalBarEnabled,
+    SuggestMove: arrowsEnabled,
+  }[modId];
+  let body = '';
+  if (modId === 'AutoMove') {
+    body = `
+      <section class="cse-bc-settings-box">
+        <h3>GENERAL SETTINGS</h3>
+        <div class="cse-bc-setting-row cse-bc-setting-stack">
+          <span><b>Mode</b><small>Choose how AutoMove selects and times moves.</small></span>
+          <div class="cse-mc-mode-btns">
+            <button class="cse-mc-mbtn ${automoveMode === 'legit' ? 'cse-mc-mbtn-on' : ''}" data-mode="legit">LEGIT</button>
+            <button class="cse-mc-mbtn ${automoveMode === 'blatant' ? 'cse-mc-mbtn-on' : ''}" data-mode="blatant">BLATANT</button>
+            <button class="cse-mc-mbtn ${automoveMode === 'human' ? 'cse-mc-mbtn-on' : ''}" data-mode="human">HUMAN</button>
+          </div>
+        </div>
+        ${automoveMode === 'human' ? `
+          <div class="cse-bc-setting-note">Strength, timing and forced premoves are automatic in Human mode.</div>
+        ` : `
+          <div class="cse-bc-setting-row">
+            <span><b>Maia strength</b><small>Maia playing strength.</small></span>
+            <label class="cse-bc-range"><i id="cse-sp-maia-elo-val">${normalizeMaiaElo(maiaElo)}</i><input type="range" class="cse-mc-slider" id="cse-sp-maia-elo" min="${MAIA_ELO_MIN}" max="${MAIA_ELO_MAX}" step="${MAIA_ELO_STEP}" value="${normalizeMaiaElo(maiaElo)}"></label>
+          </div>
+          <div class="cse-bc-setting-row">
+            <span><b>Minimum delay</b><small>Shortest delay before making a move.</small></span>
+            <label class="cse-bc-range"><i id="cse-sp-dmin-val">${automoveDelayMin}s</i><input type="range" class="cse-mc-slider" id="cse-sp-dmin" min="0" max="15" step="1" value="${automoveDelayMin}"></label>
+          </div>
+          <div class="cse-bc-setting-row">
+            <span><b>Maximum delay</b><small>Longest delay before making a move.</small></span>
+            <label class="cse-bc-range"><i id="cse-sp-dmax-val">${automoveDelayMax}s</i><input type="range" class="cse-mc-slider" id="cse-sp-dmax" min="0" max="15" step="1" value="${automoveDelayMax}"></label>
+          </div>
+        `}
+      </section>
+      <div class="cse-bc-settings-column">
+        ${automoveMode === 'human' ? '' : `
+          <section class="cse-bc-settings-box">
+            <h3>TRIGGERS</h3>
+            <label class="cse-bc-setting-row"><span><b>Fast under 30s</b><small>Reduce delay when your clock is low.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-fast-lowtime" ${automoveFastWhenLowTime ? 'checked' : ''}></label>
+            <label class="cse-bc-setting-row"><span><b>Fast in opening</b><small>Play the first eight moves faster.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-fast-opening" ${automoveFastInOpening ? 'checked' : ''}></label>
+            <label class="cse-bc-setting-row"><span><b>Smart premoves</b><small>Use safe forced premoves when available.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-smart-premoves" ${automoveUseSmartPremoves ? 'checked' : ''}></label>
+          </section>
+        `}
+        <section class="cse-bc-settings-box">
+          <h3>ADDITIONAL OPTIONS</h3>
+          <div class="cse-bc-setting-row"><span><b>Toggle hotkey</b><small>Keyboard shortcut for AutoMove.</small></span><input type="text" class="cse-mc-hotkey-input" id="cse-sp-automove-hotkey" value="${escapeHtmlAttr(formatHotkeyLabel(automoveToggleHotkey))}" data-hotkey="${escapeHtmlAttr(automoveToggleHotkey)}" readonly></div>
+        </section>
+      </div>`;
+  } else if (modId === 'PuzzleRush') {
+    body = `
+      <section class="cse-bc-settings-box"><h3>PUZZLE SETTINGS</h3>
+        <div class="cse-bc-setting-row"><span><b>Engine depth</b><small>Search depth used to solve each puzzle.</small></span><label class="cse-bc-range"><i id="cse-sp-pr-depth-val">${puzzleRushDepth}</i><input type="range" class="cse-mc-slider" id="cse-sp-pr-depth" min="1" max="15" step="1" value="${puzzleRushDepth}"></label></div>
+      </section>
+      <section class="cse-bc-settings-box"><h3>INFORMATION</h3><div class="cse-bc-setting-note">Turbo mode is used for puzzles only.</div></section>`;
+  } else if (modId === 'AutoPlay') {
+    body = `
+      <section class="cse-bc-settings-box"><h3>GAME FLOW</h3>
+        <label class="cse-bc-setting-row"><span><b>Accept rematches</b><small>Accept a rematch when the opponent requests one.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-autoplay-rematch" ${autoPlayAcceptRematch ? 'checked' : ''}></label>
+      </section>`;
+  } else if (modId === 'GameFlow') {
+    body = `
+      <section class="cse-bc-settings-box"><h3>DRAW & RESIGN</h3>
+        <label class="cse-bc-setting-row"><span><b>Answer draw offers</b><small>Accept balanced or worse positions and decline winning ones.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-gameflow-accept-draw" ${gameFlowSettings.acceptDraws ? 'checked' : ''}></label>
+        <label class="cse-bc-setting-row"><span><b>Offer draws</b><small>Offer on repetition or fortress-like endgames.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-gameflow-offer-draw" ${gameFlowSettings.offerDraws ? 'checked' : ''}></label>
+        <label class="cse-bc-setting-row"><span><b>Auto resign</b><small>Resign only after stable engine confirmation.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-gameflow-resign" ${gameFlowSettings.autoResign ? 'checked' : ''}></label>
+        <div class="cse-bc-setting-row"><span><b>Draw threshold</b><small>Maximum advantage still accepted as equal.</small></span><label class="cse-bc-range"><i id="cse-sp-gameflow-draw-val">${(gameFlowSettings.drawThresholdCp / 100).toFixed(1)}</i><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-draw" min="0" max="300" step="5" value="${gameFlowSettings.drawThresholdCp}"></label></div>
+        <div class="cse-bc-setting-row"><span><b>Resign threshold</b><small>Negative evaluation required to consider resigning.</small></span><label class="cse-bc-range"><i id="cse-sp-gameflow-resign-val">-${(gameFlowSettings.resignThresholdCp / 100).toFixed(1)}</i><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-resign-cp" min="200" max="2000" step="50" value="${gameFlowSettings.resignThresholdCp}"></label></div>
+      </section>
+      <section class="cse-bc-settings-box"><h3>SAFETY & REMATCH</h3>
+        <div class="cse-bc-setting-row"><span><b>Stable for</b><small>Seconds before a losing evaluation is trusted.</small></span><label class="cse-bc-range"><i id="cse-sp-gameflow-stable-val">${gameFlowSettings.stableSeconds}s</i><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-stable" min="2" max="30" step="1" value="${gameFlowSettings.stableSeconds}"></label></div>
+        <div class="cse-bc-setting-row"><span><b>Low-time protection</b><small>Never resign below this opponent clock.</small></span><label class="cse-bc-range"><i id="cse-sp-gameflow-lowtime-val">${gameFlowSettings.lowTimeProtectionSec}s</i><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-lowtime" min="0" max="60" step="1" value="${gameFlowSettings.lowTimeProtectionSec}"></label></div>
+        <label class="cse-bc-setting-row"><span><b>Accept rematches</b><small>Accept requests up to the configured session limit.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-gameflow-rematch" ${gameFlowSettings.acceptRematches ? 'checked' : ''}></label>
+        <div class="cse-bc-setting-row"><span><b>Rematch limit</b><small>Maximum automatic rematches per browser session.</small></span><label class="cse-bc-range"><i id="cse-sp-gameflow-rematch-val">${gameFlowSettings.maxRematches}</i><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-rematch-max" min="0" max="10" step="1" value="${gameFlowSettings.maxRematches}"></label></div>
+      </section>`;
+  } else if (modId === 'ToxicChat') {
+    body = `
+      <section class="cse-bc-settings-box"><h3>MESSAGE</h3>
+        <div class="cse-bc-setting-row cse-bc-setting-stack"><span><b>Chat message</b><small>Text sent by the module.</small></span><input type="text" class="cse-mc-hotkey-input cse-bc-text-input" id="cse-sp-toxic-message" value="${escapeHtmlAttr(toxicChatMessage)}"></div>
+      </section>
+      <section class="cse-bc-settings-box"><h3>TRIGGERS</h3>
+        <label class="cse-bc-setting-row"><span><b>Send at game start</b><small>Post when a new game begins.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-toxic-start" ${toxicChatSendOnStart ? 'checked' : ''}></label>
+        <label class="cse-bc-setting-row"><span><b>Send at game end</b><small>Post after the game finishes.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-toxic-end" ${toxicChatSendOnEnd ? 'checked' : ''}></label>
+      </section>`;
+  } else if (modId === 'EvaluationBar') {
+    body = `
+      <section class="cse-bc-settings-box"><h3>EVALUATION</h3>
+        <div class="cse-bc-setting-row"><span><b>Engine depth</b><small>Depth used for the displayed evaluation.</small></span><label class="cse-bc-range"><i id="cse-sp-depth-val">${suggestMoveDepth}</i><input type="range" class="cse-mc-slider" id="cse-sp-depth" min="1" max="15" step="1" value="${suggestMoveDepth}"></label></div>
+        <label class="cse-bc-setting-row"><span><b>Compact numeric evaluation</b><small>Show the score without the full bar.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-eval-percent" ${evalBarDisplayMode === 'percent' ? 'checked' : ''}></label>
+      </section>`;
+  } else if (modId === 'SuggestMove') {
+    body = `
+      <section class="cse-bc-settings-box"><h3>SUGGESTION SETTINGS</h3>
+        <div class="cse-bc-setting-row"><span><b>Engine depth</b><small>Search depth used for suggestions.</small></span><label class="cse-bc-range"><i id="cse-sp-depth-val">${suggestMoveDepth}</i><input type="range" class="cse-mc-slider" id="cse-sp-depth" min="1" max="15" step="1" value="${suggestMoveDepth}"></label></div>
+        <div class="cse-bc-setting-row"><span><b>Toggle hotkey</b><small>Keyboard shortcut for move suggestions.</small></span><input type="text" class="cse-mc-hotkey-input" id="cse-sp-suggest-hotkey" value="${escapeHtmlAttr(formatHotkeyLabel(suggestMoveToggleHotkey))}" data-hotkey="${escapeHtmlAttr(suggestMoveToggleHotkey)}" readonly></div>
+      </section>`;
+  }
+  return `
+    <div class="cse-mc-spanel cse-bc-detail">
+      <header class="cse-bc-detail-header">
+        <span class="cse-bc-module-icon">${cseBlockcraftIcon(icon, 47)}</span>
+        <span><h2>${modId.toUpperCase()}</h2><b>${enabled ? 'ENABLED' : 'DISABLED'}</b><p>${description}</p></span>
+        <button type="button" class="cse-bc-square cse-bc-favorite ${cseGuiState.favorites[modId] ? 'is-on' : ''}" data-bc-detail-favorite="${modId}" aria-label="Toggle favorite">${cseBlockcraftIcon('star', 25)}</button>
+        <button type="button" class="cse-mc-spanel-close" id="cse-mc-sp-close" aria-label="Close settings">×</button>
+      </header>
+      <div class="cse-bc-detail-body">${body}</div>
+      <footer class="cse-bc-detail-footer"><span>Changes are saved automatically.</span><button type="button" data-bc-apply>✓ &nbsp; APPLY CHANGES</button></footer>
+    </div>`;
+}
+
 function cseRenderSettingsPanel(modId) {
   const modal = document.getElementById('cse-mc-gui');
   if (!modal) return;
@@ -5671,10 +6626,11 @@ function cseRenderSettingsPanel(modId) {
   const isAuto = modId === 'AutoMove';
   const isPuzzleRush = modId === 'PuzzleRush';
   const isAutoPlay = modId === 'AutoPlay';
+  const isGameFlow = modId === 'GameFlow';
   const isToxicChat = modId === 'ToxicChat';
   const isEvalBar = modId === 'EvaluationBar';
   const isDepth = modId === 'SuggestMove';
-  ov.innerHTML = `
+  ov.innerHTML = uiTheme === 'blockforge' ? cseBlockcraftSettingsMarkup(modId) : `
     <div class="cse-mc-spanel">
       <div class="cse-mc-spanel-header">
         <span>${modId} Settings</span>
@@ -5744,6 +6700,16 @@ function cseRenderSettingsPanel(modId) {
             <span>Accept rematches if requested</span>
           </label>
         </div>
+      ` : isGameFlow ? `
+        <div class="cse-mc-srow cse-mc-check-row"><label class="cse-mc-check"><input type="checkbox" id="cse-sp-gameflow-accept-draw" ${gameFlowSettings.acceptDraws ? 'checked' : ''}><span>Answer draw offers automatically</span></label></div>
+        <div class="cse-mc-srow cse-mc-check-row"><label class="cse-mc-check"><input type="checkbox" id="cse-sp-gameflow-offer-draw" ${gameFlowSettings.offerDraws ? 'checked' : ''}><span>Offer draws on repetition or fortress</span></label></div>
+        <div class="cse-mc-srow cse-mc-check-row"><label class="cse-mc-check"><input type="checkbox" id="cse-sp-gameflow-resign" ${gameFlowSettings.autoResign ? 'checked' : ''}><span>Auto resign after stable confirmation</span></label></div>
+        <div class="cse-mc-srow"><div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Draw threshold</span><span class="cse-mc-sval" id="cse-sp-gameflow-draw-val">${(gameFlowSettings.drawThresholdCp / 100).toFixed(1)}</span></div><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-draw" min="0" max="300" step="5" value="${gameFlowSettings.drawThresholdCp}"></div>
+        <div class="cse-mc-srow"><div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Resign threshold</span><span class="cse-mc-sval" id="cse-sp-gameflow-resign-val">-${(gameFlowSettings.resignThresholdCp / 100).toFixed(1)}</span></div><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-resign-cp" min="200" max="2000" step="50" value="${gameFlowSettings.resignThresholdCp}"></div>
+        <div class="cse-mc-srow"><div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Stable confirmation</span><span class="cse-mc-sval" id="cse-sp-gameflow-stable-val">${gameFlowSettings.stableSeconds}s</span></div><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-stable" min="2" max="30" step="1" value="${gameFlowSettings.stableSeconds}"></div>
+        <div class="cse-mc-srow"><div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Opponent low-time protection</span><span class="cse-mc-sval" id="cse-sp-gameflow-lowtime-val">${gameFlowSettings.lowTimeProtectionSec}s</span></div><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-lowtime" min="0" max="60" step="1" value="${gameFlowSettings.lowTimeProtectionSec}"></div>
+        <div class="cse-mc-srow cse-mc-check-row"><label class="cse-mc-check"><input type="checkbox" id="cse-sp-gameflow-rematch" ${gameFlowSettings.acceptRematches ? 'checked' : ''}><span>Accept rematches automatically</span></label></div>
+        <div class="cse-mc-srow"><div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Rematch limit</span><span class="cse-mc-sval" id="cse-sp-gameflow-rematch-val">${gameFlowSettings.maxRematches}</span></div><input type="range" class="cse-mc-slider" id="cse-sp-gameflow-rematch-max" min="0" max="10" step="1" value="${gameFlowSettings.maxRematches}"></div>
       ` : isToxicChat ? `
         <div class="cse-mc-srow">
           <span class="cse-mc-slabel">Message</span>
@@ -5801,7 +6767,14 @@ function cseRenderSettingsPanel(modId) {
     }, 240);
   };
 
-  ov.querySelector('#cse-mc-sp-close').addEventListener('click', closeSettingsPanel);
+  ov.querySelectorAll('#cse-mc-sp-close, [data-bc-apply]').forEach(button => button.addEventListener('click', closeSettingsPanel));
+  const blockcraftFavorite = ov.querySelector('[data-bc-detail-favorite]');
+  if (blockcraftFavorite) blockcraftFavorite.addEventListener('click', () => {
+    const id = blockcraftFavorite.dataset.bcDetailFavorite;
+    cseGuiState.favorites[id] = !cseGuiState.favorites[id];
+    cseSaveState();
+    blockcraftFavorite.classList.toggle('is-on', cseGuiState.favorites[id]);
+  });
   ov.addEventListener('mousedown', e => {
     if (e.target === ov) {
       closeSettingsPanel();
@@ -5844,7 +6817,7 @@ function cseRenderSettingsPanel(modId) {
     window.removeEventListener('pointercancel', stopDrag);
   };
 
-  if (uiTheme !== 'verdant') header.addEventListener('pointerdown', e => {
+  if (uiTheme !== 'verdant' && uiTheme !== 'blockforge') header.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
     if (e.target.closest('#cse-mc-sp-close')) return;
     e.preventDefault();
@@ -5992,6 +6965,30 @@ function cseRenderSettingsPanel(modId) {
       cseSaveState();
       if (isAutoPlayEnabled) performAutoPlayTick();
     });
+  } else if (isGameFlow) {
+    const bindCheck = (id, key) => {
+      const input = ov.querySelector('#' + id);
+      if (input) input.addEventListener('change', () => updateGameFlowSettings({ [key]: !!input.checked }));
+    };
+    const bindRange = (id, key, valueId, format) => {
+      const input = ov.querySelector('#' + id);
+      const value = ov.querySelector('#' + valueId);
+      if (!input) return;
+      input.addEventListener('input', () => {
+        const next = parseInt(input.value, 10);
+        updateGameFlowSettings({ [key]: next });
+        if (value) value.textContent = format(next);
+      });
+    };
+    bindCheck('cse-sp-gameflow-accept-draw', 'acceptDraws');
+    bindCheck('cse-sp-gameflow-offer-draw', 'offerDraws');
+    bindCheck('cse-sp-gameflow-resign', 'autoResign');
+    bindCheck('cse-sp-gameflow-rematch', 'acceptRematches');
+    bindRange('cse-sp-gameflow-draw', 'drawThresholdCp', 'cse-sp-gameflow-draw-val', value => (value / 100).toFixed(1));
+    bindRange('cse-sp-gameflow-resign-cp', 'resignThresholdCp', 'cse-sp-gameflow-resign-val', value => '-' + (value / 100).toFixed(1));
+    bindRange('cse-sp-gameflow-stable', 'stableSeconds', 'cse-sp-gameflow-stable-val', value => value + 's');
+    bindRange('cse-sp-gameflow-lowtime', 'lowTimeProtectionSec', 'cse-sp-gameflow-lowtime-val', value => value + 's');
+    bindRange('cse-sp-gameflow-rematch-max', 'maxRematches', 'cse-sp-gameflow-rematch-val', value => String(value));
   } else if (isToxicChat) {
     const messageInput = ov.querySelector('#cse-sp-toxic-message');
     const startCb = ov.querySelector('#cse-sp-toxic-start');
@@ -6176,6 +7173,15 @@ function createToolsGui() {
   `;
   document.body.appendChild(modal);
 
+  const savedPosition = getSavedGuiPosition();
+  if (savedPosition) {
+    const position = clampToViewport(modal, savedPosition.left, savedPosition.top);
+    modal.style.left = position.left + 'px';
+    modal.style.top = position.top + 'px';
+    modal.style.right = 'auto';
+    modal.style.transform = 'none';
+  }
+
   modal.querySelector('#cse-mc-close').addEventListener('click', closeToolsGui);
 
   modal.querySelectorAll('.cse-mc-tab').forEach(tab => {
@@ -6211,6 +7217,7 @@ function createToolsGui() {
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', stopDrag);
     window.removeEventListener('pointercancel', stopDrag);
+    cseSaveState();
   };
 
   handle.addEventListener('pointerdown', e => {
@@ -6257,6 +7264,7 @@ function createToolsGui() {
 function closeToolsGui() {
   if (toolsModal) {
     const modalToClose = toolsModal;
+    cseSaveState();
     toolsModal = null;
     modalToClose.classList.add('cse-mc-gui-closing');
     setTimeout(() => {
@@ -6471,6 +7479,7 @@ window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
 if (isEvalBarEnabled) createEvaluationBarPanel();
 if (isAutomoveEnabled || isPuzzleRushEnabled) startAutomoveUiTicker();
 if (isAutoPlayEnabled) startAutoPlayTicker();
+if (isGameFlowEnabled) startGameFlowTicker();
 if (isToxicChatEnabled) startToxicChatTicker();
 syncGuiHudPanel();
 if (isAutomoveEnabled && automoveMode === 'legit') ensureLocalMaiaEngine().catch(err => console.error('[CSE][Maia] prewarm failed:', err));
@@ -6500,10 +7509,12 @@ new MutationObserver(() => {
     resetAutomoveTimingState(true);
     resetHumanGameState(null);
     clearAutoPlaySchedule(true);
+    resetGameFlowGameState(getToxicChatGameToken());
     clearToxicChatState();
     window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
     window.CSEAutoModules?.onUrlChanged?.();
     if (isAutoPlayEnabled) performAutoPlayTick();
+    if (isGameFlowEnabled) performGameFlowTick();
     if (isToxicChatEnabled) performToxicChatTick();
     setTimeout(() => window.CSEStatsCheater?.scanAndInject?.(), 1000);
   }

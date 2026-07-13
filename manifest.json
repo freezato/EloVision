@@ -25,6 +25,7 @@
         "modules/stats-cheater.js",
         "modules/game-insights.js",
         "modules/human-automove.js",
+        "modules/game-flow.js",
         "modules/core-main.js",
         "modules/eval-tools.js",
         "modules/auto-modules.js",

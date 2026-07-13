@@ -176,13 +176,15 @@ test('Human settings persist as a third mode while keeping manual values untouch
   assert.match(core, /automoveMode === 'human' \? `[\s\S]*?` : `/);
 });
 
-test('AutoMove GUI always exposes mode and full move execution timing', () => {
+test('AutoMove GUI exposes colored mode while timing stays in the top-right HUD', () => {
   assert.match(core, /function getAutomoveModeLabel\(mode = automoveMode\)/);
   assert.match(core, /function getAutomoveTimingText\(\)/);
   assert.match(core, /return `\$\{elapsedSec\.toFixed\(1\)\}s · ETA \$\{remainingSec\.toFixed\(1\)\}s`/);
   assert.match(core, /`last \$\{\(automoveLastExecutionMs \/ 1000\)\.toFixed\(1\)\}s`/);
-  assert.match(core, /cse-mc-mode-badge">\[\$\{getAutomoveModeLabel\(\)\}\]/);
-  assert.match(core, /cse-gui-hud-mode">\[\$\{modeLabel\}\]/);
+  assert.match(core, /cse-mc-mode-badge \$\{getAutomoveModeCssClass\(\)\}">\[\$\{getAutomoveModeLabel\(\)\}\]/);
+  assert.match(core, /cse-gui-hud-mode \$\{modeClass\}">\[\$\{modeLabel\}\]/);
+  assert.doesNotMatch(core, /cse-mc-mode-badge[^\n]*cse-mc-timer[^\n]*cse-mc-timer-automove/);
+  assert.match(core, /cse-gui-hud-timer">\$\{timer\}/);
   assert.match(core, /const executionMs = sent \? finishAutomoveTiming\(dispatchedFen\) : null/);
 });
 

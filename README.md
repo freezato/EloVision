@@ -16,6 +16,7 @@ move-quality insights, configurable HUD themes, and optional automation tools.
 | Analysis | Local Stockfish eval bar, top-move arrows, optional Stockfish Online API |
 | Game Insights | Live move labels, CPL-style classification, end-game recap |
 | Automation | AutoMove, Puzzle Rush solver, AutoPlay, optional premoves |
+| Game flow | Engine-aware draw responses, draw offers, resignations, and limited rematches |
 | Interface | Draggable HUD, favorites, settings panel, themes, language and number format |
 
 ---
@@ -154,6 +155,17 @@ AutoPlay watches the end screen and can:
 - Survive React node replacement on Chess.com end screens.
 - Avoid repeatedly clicking the same stale action token too quickly.
 
+### GameFlow
+
+GameFlow manages end-of-game decisions while keeping the reason visible in the
+top-right HUD:
+
+- Accepts draw offers in equal or worse positions and declines them when ahead.
+- Offers draws on repeated positions and quiet fortress-like endings.
+- Resigns only after a losing evaluation remains stable across multiple positions.
+- Suppresses resignation while the opponent is below the configured clock threshold.
+- Accepts rematches up to a configurable per-session limit.
+
 ---
 
 ## Interface
@@ -214,6 +226,7 @@ Main settings include:
 | Suggest Move hotkey | Configurable suggestion toggle hotkey. |
 | Puzzle Rush depth | Depth for puzzle solving. |
 | AutoPlay rematch | Allows or blocks rematch acceptance. |
+| GameFlow | Draw threshold, resign threshold/stability, low-time protection, and rematch limit. |
 | Engine provider | Local Stockfish or Stockfish Online API. |
 | Eval display | Bar or percent display. |
 | General language | English or Italian. |

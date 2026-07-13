@@ -887,6 +887,12 @@
   letter-spacing: 0.02em;
   vertical-align: middle;
 }
+.cse-mc-mode-badge.cse-mode-legit,
+.cse-gui-hud-mode.cse-mode-legit { color: #f2c94c; }
+.cse-mc-mode-badge.cse-mode-blatant,
+.cse-gui-hud-mode.cse-mode-blatant { color: #ff5f62; }
+.cse-mc-mode-badge.cse-mode-human,
+.cse-gui-hud-mode.cse-mode-human { color: #75c789; }
 
 .cse-mc-card-desc {
   font-size: 11px;
@@ -1502,6 +1508,21 @@
   font-size: 0.7em;
   font-weight: 750;
 }
+.cse-gui-hud-status {
+  display: inline-block;
+  max-width: 280px;
+  margin-left: 6px;
+  overflow: hidden;
+  color: #aeb7b0;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.cse-gui-hud-status.cse-status-success { color: #79db96; }
+.cse-gui-hud-status.cse-status-warning,
+.cse-gui-hud-status.cse-status-waiting { color: #f2c94c; }
+.cse-gui-hud-status.cse-status-danger { color: #ff696c; }
 
 /* Legacy */
 .cse-mc-settings-card,
@@ -2806,4 +2827,448 @@
   [data-cse-theme="verdant"] #cse-mc-gui.cse-verdant-window {
     top:8px;width:calc(100vw - 16px);height:calc(100vh - 16px);min-width:0;border-radius:12px;
   }
+}
+
+[data-cse-theme="blockforge"] #cse-mc-gui.cse-blockcraft-window {
+  --bc-lime:#8bd33f;--bc-lime-dark:#477d1c;--bc-gold:#8a6130;--bc-line:#5c4931;--bc-panel:#171916;--bc-panel-2:#20211d;
+  --bc-side:clamp(216px,19.5%,232px);
+  top:50%;width:min(1180px,calc(100vw - 56px));height:min(760px,calc(100vh - 56px));min-width:760px;
+  transform:translate(-50%,-50%);
+  color:#deddd7 !important;overflow:hidden;border:3px solid #2b2117 !important;
+  background-color:#111311 !important;
+  background-image:linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,transparent 31px,rgba(0,0,0,.18) 32px),linear-gradient(transparent 15px,rgba(0,0,0,.17) 16px) !important;
+  background-size:6px 6px,6px 6px,64px 32px,64px 32px !important;
+  box-shadow:inset 0 0 0 2px #080a08,inset 0 0 0 4px #6b5437,0 18px 55px #000 !important;
+  font-family:"Lucida Console","Courier New",monospace !important;
+}
+[data-cse-theme="blockforge"] .cse-blockcraft-window * { box-sizing:border-box; }
+[data-cse-theme="blockforge"] .cse-blockcraft-window svg { display:block;filter:drop-shadow(2px 2px 0 rgba(0,0,0,.75)); }
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-mc-header {
+  height:65px;min-height:65px;margin-left:var(--bc-side);padding:7px 42px 7px 7px !important;position:relative;z-index:4;
+  border:0 !important;border-bottom:3px solid #382b1e !important;background-color:#121412 !important;
+  background-image:linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px) !important;background-size:6px 6px !important;
+}
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-mc-tabs { gap:8px;padding:0; }
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-mc-tab {
+  min-width:150px;height:51px;margin:0 !important;padding:0 17px !important;gap:10px;justify-content:flex-start;
+  color:#e5e1d7 !important;border:2px solid #17120d !important;outline:2px solid #55422c;background:linear-gradient(#24251f,#181915) !important;
+  box-shadow:inset 0 0 0 2px #0d0f0c,0 2px 0 #080908 !important;font-size:13px;font-weight:500 !important;letter-spacing:0;text-shadow:2px 2px #050505;
+}
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-mc-tab::after { display:none; }
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-mc-tab.is-active {
+  color:#fff !important;outline-color:#76a832;background:linear-gradient(rgba(77,105,35,.75),rgba(28,35,21,.95)) !important;
+  box-shadow:inset 0 0 0 2px #11150d,inset 0 -3px 0 #619a28,0 0 9px rgba(132,207,51,.28) !important;
+}
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-mc-close-btn {
+  width:38px;height:38px;position:absolute;right:7px;top:13px;color:#e8e4da !important;border:2px solid #19130e !important;
+  outline:2px solid #58452f;background:#20211d !important;box-shadow:inset 0 0 0 2px #0b0d0b !important;font-size:20px;text-shadow:2px 2px #000;
+}
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-mc-close-btn:hover { color:#ff6d56 !important;outline-color:#954331; }
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-bc-shell { display:block !important;width:100%;height:calc(100% - 65px);padding:0 !important;position:relative;overflow:visible; }
+[data-cse-theme="blockforge"] .cse-bc-sidebar {
+  width:var(--bc-side);position:absolute;z-index:5;left:0;top:-65px;bottom:0;padding:10px 9px;border-right:3px solid #312419;
+  background-color:#101210;background-image:linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px);
+  background-size:6px 6px;box-shadow:inset -2px 0 #644d33;
+}
+[data-cse-theme="blockforge"] .cse-bc-theme-plaque,[data-cse-theme="blockforge"] .cse-bc-app-info {
+  border:2px solid #17110c;outline:2px solid #654a2e;background-color:#1d1913;
+  background-image:linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px);
+  background-size:7px 7px;box-shadow:inset 0 0 0 2px #0c0c09,0 3px 0 #070706;
+}
+[data-cse-theme="blockforge"] .cse-bc-theme-plaque { height:68px;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;text-shadow:2px 2px #000; }
+[data-cse-theme="blockforge"] .cse-bc-theme-plaque span { color:#f4f0e4;font-size:12px; }
+[data-cse-theme="blockforge"] .cse-bc-theme-plaque b { margin:0 0 6px;color:#96e247;font-size:16px;font-weight:500;white-space:nowrap; }
+[data-cse-theme="blockforge"] .cse-bc-theme-plaque small { color:#eee8dd;font-size:10px; }
+[data-cse-theme="blockforge"] .cse-bc-nav { display:flex;flex-direction:column;gap:5px;margin-top:13px; }
+[data-cse-theme="blockforge"] .cse-bc-nav button {
+  width:100%;height:54px;padding:5px 9px;display:flex;align-items:center;gap:8px;position:relative;color:#e5e1d7;text-align:left;
+  border:2px solid #17120d !important;outline:1px solid #59442d;background:#1c1d19 !important;box-shadow:inset 0 0 0 2px #0e100d,0 2px 0 #090a08;text-shadow:2px 2px #000;cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-nav button:hover { background:#25261f !important;outline-color:#76603f; }
+[data-cse-theme="blockforge"] .cse-bc-nav button.is-active { outline:2px solid #77b832;background:linear-gradient(90deg,rgba(65,105,30,.85),rgba(35,47,25,.92)) !important;box-shadow:inset 0 0 0 2px #14200f,0 0 11px rgba(130,207,48,.33); }
+[data-cse-theme="blockforge"] .cse-bc-nav button > svg { flex:0 0 44px; }
+[data-cse-theme="blockforge"] .cse-bc-nav button > span { min-width:0;display:flex;flex:1;flex-direction:column;gap:5px; }
+[data-cse-theme="blockforge"] .cse-bc-nav button b { font-size:12px;font-weight:500; }
+[data-cse-theme="blockforge"] .cse-bc-nav button small { color:#b7b7b2;font:10px/1.1 "Segoe UI",sans-serif;text-shadow:none;white-space:nowrap; }
+[data-cse-theme="blockforge"] .cse-bc-nav button i { color:#9edf43;font-size:25px;font-style:normal; }
+[data-cse-theme="blockforge"] .cse-bc-app-info {
+  position:absolute;left:11px;right:11px;bottom:12px;min-height:140px;padding:12px 13px;display:flex;flex-direction:column;gap:7px;
+}
+[data-cse-theme="blockforge"] .cse-bc-app-info b { margin-bottom:4px;color:#9add49;text-align:center;font-size:12px;font-weight:500; }
+[data-cse-theme="blockforge"] .cse-bc-app-info span { color:#d4d2cc;font:10px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-app-info small { margin-top:auto;color:#d4d2cc;font:10px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-main { height:100%;margin-left:var(--bc-side);display:grid;grid-template-rows:82px 59px minmax(0,1fr) 63px;color:#deddd7; }
+[data-cse-theme="blockforge"] .cse-bc-heading {
+  margin:7px 8px 0;padding:7px 13px;display:flex;align-items:center;gap:12px;border:2px solid #17120d;outline:2px solid #624b31;
+  background:rgba(21,23,20,.92);box-shadow:inset 0 0 0 2px #0b0d0b;
+}
+[data-cse-theme="blockforge"] .cse-bc-heading-icon { width:59px;height:59px;display:grid;place-items:center;border-right:1px solid rgba(119,93,60,.5); }
+[data-cse-theme="blockforge"] .cse-bc-heading h2 { margin:0 0 5px;color:#e5e3dc;font-size:23px;line-height:1;font-weight:500;text-shadow:2px 2px #000; }
+[data-cse-theme="blockforge"] .cse-bc-heading p { margin:0;color:#b6b5b0;font:12px/1.2 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-view { display:flex;gap:11px;margin-left:auto; }
+[data-cse-theme="blockforge"] .cse-bc-view button,[data-cse-theme="blockforge"] .cse-bc-square {
+  width:46px;height:38px;display:grid;place-items:center;color:#d9d6cc;border:2px solid #17120d !important;outline:1px solid #654e34;background:#1c1d19 !important;box-shadow:inset 0 0 0 2px #0c0e0b;cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-view button.is-active { outline-color:#769e32;background:#25331d !important; }
+[data-cse-theme="blockforge"] .cse-bc-filters {
+  margin:7px 8px 5px;padding:8px 11px;display:flex;align-items:center;gap:10px;border:2px solid #17120d;outline:1px solid #4f3d2a;background:rgba(17,19,17,.94);box-shadow:inset 0 0 0 2px #090b09;
+}
+[data-cse-theme="blockforge"] .cse-bc-filters > div { display:flex;gap:9px;min-width:0; }
+[data-cse-theme="blockforge"] .cse-bc-filters button {
+  min-width:65px;height:31px;padding:0 12px;color:#dfddd5;border:2px solid #17120d !important;outline:1px solid #59442d;background:#1a1b18 !important;
+  box-shadow:inset 0 0 0 1px #0c0e0b;font:10px/1 "Lucida Console","Courier New",monospace;cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-filters button.is-active { color:#f5f8ed;outline-color:#6ea72e;background:#27371e !important; }
+[data-cse-theme="blockforge"] .cse-bc-filters > span { margin-left:auto;color:#ddd9ce;font-size:10px;white-space:nowrap; }
+[data-cse-theme="blockforge"] .cse-bc-cards { min-height:0;padding:7px 9px 9px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:minmax(188px,1fr);gap:10px;overflow:auto; }
+[data-cse-theme="blockforge"] .cse-bc-cards::-webkit-scrollbar { width:7px; }
+[data-cse-theme="blockforge"] .cse-bc-cards::-webkit-scrollbar-thumb { background:#5d4930;border:1px solid #17120d; }
+[data-cse-theme="blockforge"] .cse-bc-card {
+  min-width:0;padding:11px 10px 9px;display:flex;flex-direction:column;border:2px solid #17120d;outline:2px solid #5d4930;background-color:#1b1d1a;
+  background-image:linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px);
+  background-size:6px 6px;box-shadow:inset 0 0 0 2px #0c0e0c,0 3px 0 #080908;
+}
+[data-cse-theme="blockforge"] .cse-bc-card:hover { outline-color:#77603d;background-color:#21231f; }
+[data-cse-theme="blockforge"] .cse-bc-card-head { display:flex;align-items:flex-start;gap:8px;min-width:0; }
+[data-cse-theme="blockforge"] .cse-bc-module-icon {
+  width:49px;height:49px;flex:0 0 49px;display:grid;place-items:center;border:2px solid #17200f;outline:1px solid #426b24;
+  background:linear-gradient(135deg,#28451b,#172515);box-shadow:inset 0 0 0 2px #0c120a;
+}
+[data-cse-theme="blockforge"] .cse-bc-module-copy { min-width:0;display:flex;flex:1;flex-direction:column;gap:8px;padding-top:5px; }
+[data-cse-theme="blockforge"] .cse-bc-module-copy b { overflow:hidden;color:#eeeae0;font-size:12px;font-weight:500;text-overflow:ellipsis;white-space:nowrap;text-shadow:2px 2px #000; }
+[data-cse-theme="blockforge"] .cse-bc-module-copy small { color:#90d542;font-size:10px; }
+[data-cse-theme="blockforge"] .cse-bc-switch {
+  width:35px;height:20px;flex:0 0 35px;margin-top:6px;padding:0;position:relative;border:2px solid #11130f !important;outline:1px solid #494c43;background:#3b3e39 !important;cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-switch span { width:14px;height:14px;position:absolute;left:2px;top:1px;background:#9c9f98;box-shadow:1px 1px #111; }
+[data-cse-theme="blockforge"] .cse-bc-switch.is-on { outline-color:#639e2b;background:#477d1d !important; }
+[data-cse-theme="blockforge"] .cse-bc-switch.is-on span { left:16px;background:#f2f2e9; }
+[data-cse-theme="blockforge"] .cse-bc-card > p { min-height:55px;margin:15px 4px 10px;color:#cdccc7;font:12px/1.55 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-card-actions { margin-top:auto;padding:8px 3px 1px;display:flex;justify-content:space-between;border-top:1px solid rgba(93,75,51,.35); }
+[data-cse-theme="blockforge"] .cse-bc-square { width:46px;height:33px; }
+[data-cse-theme="blockforge"] .cse-bc-square:hover { outline-color:#8d7045;background:#282a24 !important; }
+[data-cse-theme="blockforge"] .cse-bc-square.is-disabled { opacity:.3;cursor:not-allowed; }
+[data-cse-theme="blockforge"] .cse-bc-favorite:not(.is-on) svg { filter:grayscale(1) brightness(.75) drop-shadow(2px 2px #000); }
+[data-cse-theme="blockforge"] .cse-bc-cards.is-list { grid-template-columns:1fr 1fr;grid-auto-rows:132px; }
+[data-cse-theme="blockforge"] .cse-bc-cards.is-list .cse-bc-card > p { min-height:0;margin:10px 4px 6px; }
+[data-cse-theme="blockforge"] .cse-bc-empty { grid-column:1/-1;display:grid;place-items:center;color:#77745f;font-size:13px; }
+[data-cse-theme="blockforge"] .cse-bc-footer {
+  margin:0 8px 7px;padding:9px 16px;display:flex;align-items:center;justify-content:center;border:2px solid #17120d;outline:1px solid #59442d;background:#151714;box-shadow:inset 0 0 0 2px #090b09;
+}
+[data-cse-theme="blockforge"] .cse-bc-footer > div { display:flex;gap:19px;align-items:center; }
+[data-cse-theme="blockforge"] .cse-bc-footer button,[data-cse-theme="blockforge"] .cse-bc-footer b,[data-cse-theme="blockforge"] .cse-bc-footer strong {
+  min-width:49px;height:35px;display:grid;place-items:center;color:#dedbd2;border:2px solid #17120d;outline:1px solid #5d4930;background:#1b1d19;font-size:12px;font-weight:500;
+}
+[data-cse-theme="blockforge"] .cse-bc-footer b { color:#fff;outline-color:#79b233;background:#34511f;box-shadow:inset 0 0 0 2px #17230f; }
+[data-cse-theme="blockforge"] .cse-bc-footer > span { margin-left:auto;color:#c7c5bf;font:11px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-footer strong { min-width:132px;display:inline-flex;justify-content:space-between;margin-left:12px;padding:0 15px; }
+
+[data-cse-theme="blockforge"] .cse-bc-settings-main {
+  grid-template-rows:82px minmax(0,1fr);
+}
+[data-cse-theme="blockforge"] .cse-bc-global-settings {
+  min-height:0;
+  padding:9px;
+  overflow:auto;
+}
+[data-cse-theme="blockforge"] .cse-bc-global-settings::-webkit-scrollbar { width:8px; }
+[data-cse-theme="blockforge"] .cse-bc-global-settings::-webkit-scrollbar-thumb { background:#5d4930;border:2px solid #141611; }
+[data-cse-theme="blockforge"] .cse-bc-global-columns {
+  min-height:100%;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 292px;
+  gap:11px;
+  align-items:start;
+}
+[data-cse-theme="blockforge"] .cse-bc-global-primary,
+[data-cse-theme="blockforge"] .cse-bc-global-secondary {
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:11px;
+}
+[data-cse-theme="blockforge"] .cse-bc-global-box {
+  min-width:0;
+  color:#dedbd3;
+  border:2px solid #17120d;
+  outline:2px solid #5e4930;
+  background-color:#1a1c19;
+  background-image:linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px);
+  background-size:6px 6px;
+  box-shadow:inset 0 0 0 2px #0c0e0c;
+}
+[data-cse-theme="blockforge"] .cse-bc-global-box > h3 {
+  margin:0;
+  padding:12px 12px 9px;
+  color:#98df48;
+  border-bottom:1px solid #3f3324;
+  font-size:11px;
+  font-weight:500;
+  text-shadow:2px 2px #0a0b09;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider-box > p {
+  margin:9px 12px 2px;
+  color:#bab9b3;
+  font:10px/1.3 "Segoe UI",sans-serif;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider-options {
+  padding:8px 11px;
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider {
+  min-height:112px;
+  padding:11px;
+  display:flex;
+  align-items:flex-start;
+  gap:9px;
+  color:#ddd9cf;
+  text-align:left;
+  border:2px solid #15110d !important;
+  outline:1px solid #5e4930;
+  background:#181a17 !important;
+  box-shadow:inset 0 0 0 2px #0b0d0b;
+  cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider.is-active {
+  outline:2px solid #81c638;
+  background:linear-gradient(135deg,rgba(58,91,31,.48),#181a17 62%) !important;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider > i {
+  width:16px;height:16px;
+  flex:0 0 16px;
+  margin-top:2px;
+  border:3px solid #10120f;
+  outline:1px solid #6b5a3e;
+  border-radius:50%;
+  background:#22241f;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider.is-active > i { outline-color:#78bb31;background:#8be13b;box-shadow:inset 0 0 0 3px #294618; }
+[data-cse-theme="blockforge"] .cse-bc-provider > span {
+  min-width:0;
+  display:grid;
+  grid-template-columns:31px 1fr auto;
+  align-items:center;
+  flex:1;
+  gap:4px 7px;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider b { color:#efebe2;font:500 13px/1.1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-provider em {
+  padding:3px 6px;
+  color:#9fe64c;
+  border:1px solid #60982a;
+  background:#263b1a;
+  font-size:8px;
+  font-style:normal;
+}
+[data-cse-theme="blockforge"] .cse-bc-provider small { grid-column:2/4;margin-top:5px;color:#bcbab4;font:10px/1.4 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-global-note {
+  margin:2px 11px 10px;
+  padding:8px 10px;
+  color:#c0beb7;
+  border:1px solid #514028;
+  background:#141612;
+  font:10px/1.35 "Segoe UI",sans-serif;
+}
+[data-cse-theme="blockforge"] .cse-bc-global-box .cse-bc-setting-row { min-height:51px;margin:0 10px;padding:8px 4px; }
+[data-cse-theme="blockforge"] .cse-bc-global-split {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:0 10px;
+}
+[data-cse-theme="blockforge"] .cse-bc-global-split > div + div { border-left:1px solid rgba(89,70,47,.45);padding-left:5px; }
+[data-cse-theme="blockforge"] .cse-bc-select {
+  min-width:150px;
+  height:34px;
+  padding:0 11px;
+  color:#e6e1d7;
+  border:2px solid #14110d !important;
+  outline:1px solid #654d31;
+  border-radius:0;
+  background:#131512;
+  font:10px/1 "Segoe UI",sans-serif;
+}
+[data-cse-theme="blockforge"] .cse-bc-value {
+  min-width:100px;
+  padding:8px 10px;
+  color:#9edf49;
+  border:1px solid #5b472d;
+  background:#121411;
+  text-align:center;
+  font-size:9px;
+  font-weight:500;
+}
+[data-cse-theme="blockforge"] .cse-bc-color-row { display:flex;align-items:center;gap:6px; }
+[data-cse-theme="blockforge"] .cse-bc-color-row button {
+  width:20px;height:20px;
+  padding:0;
+  border:2px solid #0f100e !important;
+  outline:1px solid #554631;
+  cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-color-row button.is-active { outline:2px solid #b9f26e;box-shadow:0 0 7px rgba(137,216,58,.45); }
+[data-cse-theme="blockforge"] .cse-bc-color-emerald { background:#69be34 !important; }
+[data-cse-theme="blockforge"] .cse-bc-color-cyan { background:#35abc9 !important; }
+[data-cse-theme="blockforge"] .cse-bc-color-violet { background:#7556cf !important; }
+[data-cse-theme="blockforge"] .cse-bc-color-rose { background:#c84d78 !important; }
+[data-cse-theme="blockforge"] .cse-bc-color-gold { background:#d19c31 !important; }
+[data-cse-theme="blockforge"] .cse-bc-color-row-large { padding:15px;gap:11px; }
+[data-cse-theme="blockforge"] .cse-bc-color-row-large button { width:33px;height:28px; }
+[data-cse-theme="blockforge"] .cse-bc-side-control { padding:11px;display:flex;flex-direction:column;gap:9px; }
+[data-cse-theme="blockforge"] .cse-bc-side-control > span { display:flex;align-items:center;gap:8px;color:#9bdc48;font-size:18px; }
+[data-cse-theme="blockforge"] .cse-bc-side-control > span b { color:#d8d5ce;font:500 11px/1.2 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-side-control .cse-bc-select { width:100%; }
+[data-cse-theme="blockforge"] .cse-bc-side-summary { padding:13px;display:flex;align-items:center;gap:11px; }
+[data-cse-theme="blockforge"] .cse-bc-side-summary > span { display:flex;flex-direction:column;gap:5px; }
+[data-cse-theme="blockforge"] .cse-bc-side-summary b { color:#e9e5dc;font:500 12px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-side-summary small { color:#918f89;font:9px/1.2 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-action {
+  min-width:112px;height:32px;
+  color:#dfead5;
+  border:2px solid #13110d !important;
+  outline:1px solid #6e9e34;
+  background:#29431c !important;
+  font:10px/1 "Lucida Console","Courier New",monospace;
+  cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-stat-grid { padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:7px; }
+[data-cse-theme="blockforge"] .cse-bc-stat-grid > span {
+  min-height:55px;
+  padding:8px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  gap:5px;
+  border:1px solid #4d3c29;
+  background:#141613;
+}
+[data-cse-theme="blockforge"] .cse-bc-stat-grid small { color:#898780;font:9px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-stat-grid b { color:#dedbd2;font:500 11px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-stat-grid b.is-good { color:#91da43; }
+[data-cse-theme="blockforge"] .cse-bc-stat-grid b.is-bad { color:#e05b47; }
+[data-cse-theme="blockforge"] .cse-bc-theme-options { padding:11px;display:grid;grid-template-columns:1fr 1fr;gap:9px; }
+[data-cse-theme="blockforge"] .cse-bc-theme-options button {
+  min-height:82px;
+  padding:10px;
+  display:grid;
+  grid-template-columns:42px 1fr 22px;
+  grid-template-rows:auto auto;
+  align-items:center;
+  gap:4px 8px;
+  color:#d9d6ce;
+  text-align:left;
+  border:2px solid #15110d !important;
+  outline:1px solid #5d482f;
+  background:#161815 !important;
+  cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-theme-options button.is-active { outline:2px solid #81c638;background:#213119 !important; }
+[data-cse-theme="blockforge"] .cse-bc-theme-options button > span { grid-row:1/3;display:grid;place-items:center; }
+[data-cse-theme="blockforge"] .cse-bc-theme-options b { color:#ece8df;font:500 11px/1.1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-theme-options small { color:#908e88;font:9px/1.2 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-theme-options i { grid-column:3;grid-row:1/3;color:#9de34a;font-size:17px;font-style:normal; }
+[data-cse-theme="blockforge"] .cse-bc-mini-preview {
+  height:132px;
+  margin:10px;
+  padding:10px;
+  position:relative;
+  overflow:hidden;
+  color:#e7e3d8;
+  border:2px solid #12100d;
+  outline:1px solid #5b472f;
+  background:#11130f;
+}
+[data-cse-theme="blockforge"] .cse-bc-mini-preview i { display:block;width:38px;height:38px;background:linear-gradient(#65962f 0 35%,#644128 36%);box-shadow:40px 0 #20231c,80px 0 #20231c; }
+[data-cse-theme="blockforge"] .cse-bc-mini-preview b { display:block;margin:9px 0;font-size:10px; }
+[data-cse-theme="blockforge"] .cse-bc-mini-preview span { display:block;width:78%;height:6px;margin:6px 0;background:#33362f; }
+[data-cse-theme="blockforge"] .cse-bc-mini-preview span:nth-of-type(2) { width:54%; }
+[data-cse-theme="blockforge"] .cse-bc-mini-preview button { position:absolute;right:9px;bottom:9px;padding:6px;color:#a4e75a;border:1px solid #608d30;background:#20331a;font-size:8px; }
+[data-cse-theme="blockforge"] .cse-bc-about-hero { padding:18px;display:flex;align-items:center;gap:20px; }
+[data-cse-theme="blockforge"] .cse-bc-about-hero > span { width:92px;height:92px;display:grid;place-items:center;border:2px solid #29461a;background:#182516; }
+[data-cse-theme="blockforge"] .cse-bc-about-hero h3 { margin:0 0 10px;color:#9ce24b;font-size:20px;font-weight:500; }
+[data-cse-theme="blockforge"] .cse-bc-about-hero b { color:#eee9df;font:500 12px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-about-hero p { color:#a8a7a1;font:10px/1.5 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-about-list { padding:12px;display:flex;flex-direction:column;gap:10px; }
+[data-cse-theme="blockforge"] .cse-bc-about-list span { color:#c9c7c1;font:10px/1.2 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-about-list span::before { content:"▣";margin-right:8px;color:#91d83f; }
+[data-cse-theme="blockforge"] .cse-bc-about-meta { padding:12px;display:flex;flex-direction:column;gap:10px; }
+[data-cse-theme="blockforge"] .cse-bc-about-meta span { display:flex;justify-content:space-between;color:#aaa8a1;font:10px/1.2 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-about-meta b { color:#e7e2d8;font-weight:500; }
+
+[data-cse-theme="blockforge"] .cse-blockcraft-window > .cse-mc-settings-overlay {
+  inset:65px 0 0 var(--bc-side);z-index:8;border-radius:0;background:#101210;
+  background-image:linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px);background-size:6px 6px;backdrop-filter:none;
+}
+[data-cse-theme="blockforge"] .cse-blockcraft-window .cse-bc-detail {
+  width:100%;height:100%;max-height:none;left:0;top:0;padding:7px 9px 8px;display:grid;grid-template-rows:79px minmax(0,1fr) 63px;
+  opacity:1;overflow:hidden;transform:none;border:0 !important;outline:0;background:transparent !important;box-shadow:none !important;
+}
+[data-cse-theme="blockforge"] .cse-mc-settings-overlay.is-open .cse-bc-detail { transform:none; }
+[data-cse-theme="blockforge"] .cse-bc-detail-header {
+  padding:7px 11px;display:flex;align-items:center;gap:12px;border:2px solid #17120d;outline:2px solid #60492f;background:#191b18;box-shadow:inset 0 0 0 2px #0b0d0b;
+}
+[data-cse-theme="blockforge"] .cse-bc-detail-header > span:nth-child(2) { flex:1;display:grid;grid-template-columns:auto 1fr;align-items:center;column-gap:17px; }
+[data-cse-theme="blockforge"] .cse-bc-detail-header h2 { margin:0;color:#e7e3d9;font-size:22px;font-weight:500;text-shadow:2px 2px #000; }
+[data-cse-theme="blockforge"] .cse-bc-detail-header > span > b { justify-self:start;color:#91dd43;font-size:11px;font-weight:500; }
+[data-cse-theme="blockforge"] .cse-bc-detail-header p { grid-column:1/3;margin:5px 0 0;color:#c3c2bd;font:11px/1.2 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-detail-header .cse-mc-spanel-close {
+  width:42px;height:38px;display:grid;place-items:center;color:#eee9df;border:2px solid #17120d !important;outline:1px solid #714637;background:#211b18;font-size:22px;
+}
+[data-cse-theme="blockforge"] .cse-bc-detail-body {
+  min-height:0;padding:11px 2px;display:grid;grid-template-columns:1fr 1.05fr;align-content:start;gap:13px;overflow:auto;
+}
+[data-cse-theme="blockforge"] .cse-bc-settings-column { display:flex;flex-direction:column;gap:13px; }
+[data-cse-theme="blockforge"] .cse-bc-settings-box { min-width:0;border:2px solid #17120d;outline:2px solid #5f4a31;background:#1b1d1a;box-shadow:inset 0 0 0 2px #0c0e0c; }
+[data-cse-theme="blockforge"] .cse-bc-settings-box h3 { margin:0;padding:14px 12px 11px;color:#96df47;border-bottom:1px solid #3e3224;font-size:12px;font-weight:500; }
+[data-cse-theme="blockforge"] .cse-bc-setting-row {
+  min-height:55px;margin:0 10px;padding:9px 5px;display:flex;align-items:center;gap:15px;border-bottom:1px solid rgba(91,75,53,.33);
+}
+[data-cse-theme="blockforge"] .cse-bc-setting-row:last-child { border-bottom:0; }
+[data-cse-theme="blockforge"] .cse-bc-setting-row > span { min-width:0;display:flex;flex:1;flex-direction:column;gap:4px; }
+[data-cse-theme="blockforge"] .cse-bc-setting-row b { color:#ebe7dc;font:500 12px/1.15 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-setting-row small { color:#b1b0aa;font:10px/1.25 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-setting-stack { align-items:stretch;flex-direction:column; }
+[data-cse-theme="blockforge"] .cse-bc-setting-stack > span { width:100%; }
+[data-cse-theme="blockforge"] .cse-bc-setting-note { margin:11px;padding:12px;color:#b8b7b1;border:1px solid #4a3a27;background:#151713;font:10px/1.45 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-range { min-width:178px;display:flex;align-items:center;gap:9px; }
+[data-cse-theme="blockforge"] .cse-bc-range i {
+  min-width:48px;height:28px;display:grid;place-items:center;color:#e9e6dd;border:2px solid #12100d;outline:1px solid #3d3428;background:#131512;font:11px/1 "Segoe UI",sans-serif;font-style:normal;
+}
+[data-cse-theme="blockforge"] .cse-bc-detail .cse-mc-slider {
+  height:6px;border:2px solid #0f110e;border-radius:0;background:linear-gradient(90deg,#639d29 var(--cse-range-progress),#262924 var(--cse-range-progress));
+}
+[data-cse-theme="blockforge"] .cse-bc-detail .cse-mc-slider::-webkit-slider-thumb { width:14px;height:14px;border:3px solid #17200f;border-radius:0;background:#8bd441;box-shadow:0 0 0 1px #4f7627; }
+[data-cse-theme="blockforge"] .cse-bc-detail .cse-mc-mode-btns { width:100%;gap:8px; }
+[data-cse-theme="blockforge"] .cse-bc-detail .cse-mc-mbtn {
+  height:33px;color:#d8d4ca;border:2px solid #17120d;outline:1px solid #59442d;background:#191b17;font-size:10px;border-radius:0;
+}
+[data-cse-theme="blockforge"] .cse-bc-detail .cse-mc-mbtn-on { color:#f4f7eb;outline-color:#79b535;background:#304b20; }
+[data-cse-theme="blockforge"] .cse-bc-check {
+  width:43px;height:24px;flex:0 0 43px;appearance:none;position:relative;border:2px solid #11130f;outline:1px solid #494c43;background:#3b3e39;cursor:pointer;
+}
+[data-cse-theme="blockforge"] .cse-bc-check::after { content:"";width:17px;height:17px;position:absolute;left:2px;top:2px;background:#a5a7a2;box-shadow:1px 1px #111; }
+[data-cse-theme="blockforge"] .cse-bc-check:checked { outline-color:#639e2b;background:#477d1d; }
+[data-cse-theme="blockforge"] .cse-bc-check:checked::after { left:20px;background:#f2f2e9; }
+[data-cse-theme="blockforge"] .cse-bc-detail .cse-mc-hotkey-input {
+  width:180px;min-width:180px;height:33px;padding:0 10px;color:#e8e4da;border:2px solid #11100d !important;outline:1px solid #5d4930;border-radius:0;background:#121411 !important;font:10px/1 "Segoe UI",sans-serif;
+}
+[data-cse-theme="blockforge"] .cse-bc-detail .cse-bc-text-input { width:100%; }
+[data-cse-theme="blockforge"] .cse-bc-detail-footer {
+  padding:10px;display:flex;align-items:center;border:2px solid #17120d;outline:1px solid #5b452d;background:#171916;box-shadow:inset 0 0 0 2px #0b0d0b;
+}
+[data-cse-theme="blockforge"] .cse-bc-detail-footer span { color:#8f8e88;font:10px/1 "Segoe UI",sans-serif; }
+[data-cse-theme="blockforge"] .cse-bc-detail-footer button {
+  min-width:255px;height:39px;margin-left:auto;color:#f1f6e9;border:2px solid #17200f !important;outline:2px solid #6aa72e;
+  background:linear-gradient(#4f8426,#335b1c) !important;box-shadow:inset 0 0 0 2px #213b14;font:12px/1 "Lucida Console","Courier New",monospace;text-shadow:2px 2px #17200f;cursor:pointer;
+}
+@media (max-width:1050px) {
+  [data-cse-theme="blockforge"] .cse-bc-cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  [data-cse-theme="blockforge"] .cse-bc-filters { overflow-x:auto; }
+  [data-cse-theme="blockforge"] .cse-bc-filters > span { display:none; }
+}
+@media (max-height:760px) {
+  [data-cse-theme="blockforge"] .cse-bc-app-info { display:none; }
+  [data-cse-theme="blockforge"] .cse-bc-nav { gap:5px; }
+  [data-cse-theme="blockforge"] .cse-bc-nav button { height:55px; }
 }
