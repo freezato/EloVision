@@ -183,7 +183,7 @@ test('AutoMove GUI always exposes mode and full move execution timing', () => {
   assert.match(core, /`last \$\{\(automoveLastExecutionMs \/ 1000\)\.toFixed\(1\)\}s`/);
   assert.match(core, /cse-mc-mode-badge">\[\$\{getAutomoveModeLabel\(\)\}\]/);
   assert.match(core, /cse-gui-hud-mode">\[\$\{modeLabel\}\]/);
-  assert.match(core, /const executionMs = sent \? finishAutomoveTiming\(automoveTargetFen\) : null/);
+  assert.match(core, /const executionMs = sent \? finishAutomoveTiming\(dispatchedFen\) : null/);
 });
 
 test('Human local search is prewarmed and returns partial MultiPV work at its bullet deadline', () => {
@@ -191,7 +191,11 @@ test('Human local search is prewarmed and returns partial MultiPV work at its bu
   assert.match(core, /clockSec < 5\) bandLimitMs = 180/);
   assert.match(core, /clockSec < 20\) bandLimitMs = 450/);
   assert.match(core, /isOpening[\s\S]*?clockSec < 60 \? 240[\s\S]*?: 350/);
-  assert.match(core, /engineDeadlineJitter = 0\.85 \+ \(Math\.random\(\) \* 0\.30\)/);
+  assert.match(core, /engineDeadlineJitter = 0\.65 \+ \(Math\.random\(\) \* 0\.70\)/);
+  assert.match(core, /const styles = \['fast', 'normal', 'slow'\]/);
+  assert.match(core, /const lastTwoSame = history\.length >= 2/);
+  assert.match(core, /lastTwoSame \? styles\.filter\(style => style !== history\[history\.length - 1\]\) : styles/);
+  assert.match(core, /engineElapsedSec \+ postEnginePauseSec/);
   assert.match(core, /const partialResult = buildLocalStockfishResult\(search\.turn, null, search\.linesByPv\)/);
   assert.match(core, /clearLocalStockfishSearch\(partialResult\)/);
   assert.match(core, /automoveMode === 'human'\) ensureLocalStockfishEngine\(\)/);

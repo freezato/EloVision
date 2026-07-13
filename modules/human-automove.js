@@ -57,7 +57,7 @@
   } = {}) {
     const c = clamp(Number(complexity) || 0, 0, 1);
     const rand = typeof random === 'function' ? clamp(Number(random()) || 0, 0, 1) : 0.5;
-    const jitter = 0.85 + (rand * 0.30);
+    const jitter = 0.65 + (rand * 0.70);
 
     if (!Number.isFinite(clockSec)) {
       let fallback = clamp((0.3 + (3.7 * c)) * jitter, 0.3, 4);

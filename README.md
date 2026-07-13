@@ -1,178 +1,385 @@
-# ♟️ Chess.com Opponent Stats
+# Chess.com Opponent Stats
 
-> A Chrome extension that supercharges your Chess.com experience with real-time opponent statistics, Stockfish-powered move evaluation, automation tools, and cheat detection — all in a sleek, draggable HUD.
+Chrome extension for Chess.com with opponent statistics, live engine analysis,
+move-quality insights, configurable HUD themes, and optional automation tools.
 
----
-
-## ✨ Features
-
-### 📊 Opponent Stats Panel
-Instantly view detailed statistics for any opponent directly on Chess.com:
-- **Win / Loss / Draw** breakdown over the last **1, 7, and 30 days**
-- **Win/Loss Ratio (WLR)** with color-coded indicators
-- **Win Rate %** per time period
-- **Current ratings** (Bullet, Blitz, Rapid)
-- **Peak ELO** across all time controls
-- Animated counters on panel open for a polished UX
-- Draggable, closeable panel injected next to any username
-
-### 🕵️ Cheater Finder
-Click the 🕵️ button next to any username to run an automated cheating analysis:
-- Suspicion score out of 100
-- Animated **radar chart** visualizing cheating indicators (accuracy, volume, account age, rating patterns)
-- Uses publicly available Chess.com API data — no third-party services
-
-### 🤖 Auto-Move
-Automated move execution powered by Stockfish evaluation:
-- **Blatant mode**: plays instantly
-- **Legit mode**: randomized delay between configurable min/max seconds
-- **Human mode**: in online and computer games, automatically chooses Stockfish strength, a safe weighted MultiPV move, and reflection time from the position and clock
-- **Speed-up when low on time** (< 30s on clock)
-- **Opening speed-up** option (first 8 full moves)
-- **Smart premoves**: configurable for Legit; Human enables them automatically only for verified recaptures or forced replies
-
-### 📡 Stockfish Evaluation Bar
-Real-time position evaluation with selectable engine provider:
-- **Local Stockfish** (default): runs directly in-browser via bundled worker
-- **Stockfish Online API** fallback/alternative provider
-- Floating, draggable evaluation bar
-- Displays score in **centipawns** or **percentage** (configurable)
-- Top-move arrows overlaid directly on the board
-- Configurable analysis depth
-- Auto-reload on engine failure with failure streak tracking
-- Persists position across page navigation (SPA-aware)
-
-### 🧩 Puzzle Rush Solver
-Automatically solves Chess.com Puzzle Rush puzzles:
-- Configurable engine depth
-- Fallback depth on stuck positions with timeout detection
-
-### ▶️ Auto Play
-Continuous game automation:
-- Starts a fresh match from the end screen and can optionally accept an incoming rematch
-- Persists across Chess.com's SPA navigation
-
-### 🖥️ Tools GUI (HUD)
-A central control panel accessible via the **right Shift key** or the floating `Tools` button:
-- Toggle individual modules on/off at runtime
-- Configure delays, depths, and modes
-- Tabbed layout with favorites support
-- Draggable, pointer-capture based drag (mobile-friendly)
-- State persisted to `localStorage` across sessions
+> Built as a Manifest V3 unpacked extension. No build step is required.
 
 ---
 
-## 🏗️ Project Structure
+## What It Does
 
+| Area | Features |
+| --- | --- |
+| Opponent stats | Recent performance, W/L/D, WLR, win rate, current ratings, peak rating |
+| Cheater Finder | Suspicion score, radar-style report, account and accuracy signals |
+| Analysis | Local Stockfish eval bar, top-move arrows, optional Stockfish Online API |
+| Game Insights | Live move labels, CPL-style classification, end-game recap |
+| Automation | AutoMove, Puzzle Rush solver, AutoPlay, optional premoves |
+| Interface | Draggable HUD, favorites, settings panel, themes, language and number format |
+
+---
+
+## Main Features
+
+### Opponent Stats
+
+The extension injects quick action buttons next to Chess.com usernames and can
+show:
+
+- Win, loss, and draw totals for the last 1, 7, and 30 days.
+- Win/loss ratio and win rate with visual indicators.
+- Current Bullet, Blitz, and Rapid ratings.
+- Peak rating across supported time controls.
+- Cached Chess.com API responses to avoid repeated requests.
+
+### Cheater Finder
+
+Cheater Finder uses public Chess.com data to build a local suspicion report:
+
+- Score from 0 to 100.
+- Account age and recent-game volume.
+- Win-rate spikes by time control.
+- High-accuracy game frequency when available in archived games.
+- Animated panel with visual summary and reason list.
+
+### Stockfish Evaluation Bar
+
+The eval bar can run with:
+
+- Local bundled Stockfish, loaded from `modules/stockfish/`.
+- Optional Stockfish Online API provider.
+- Configurable depth for suggestions and analysis.
+- Centipawn or percent display mode.
+- Draggable floating bar.
+- Board arrows for the suggested move.
+- Auto-reload and hash-clear controls for the local engine.
+- SPA-aware state reset when Chess.com changes route without a full reload.
+
+### Game Insights
+
+Game Insights tracks positions and move transitions during a game:
+
+- Classifies moves as Brilliant, Great, Best, Good, OK, Inaccuracy, Mistake, or Blunder.
+- Stores recent evaluated positions in memory.
+- Adds move-quality badges to the notation where possible.
+- Shows a recap when the game ends.
+- Resets cleanly on new games and navigation changes.
+
+### AutoMove
+
+AutoMove supports three modes:
+
+| Mode | Behavior |
+| --- | --- |
+| `Blatant` | Uses the strongest available move and executes quickly. |
+| `Legit` | Uses local Maia with configurable strength and randomized user delay. |
+| `Human` | Uses local Stockfish MultiPV and automatically chooses strength, move, timing, and forced premoves. |
+
+The GUI always shows the active mode next to AutoMove, for example
+`AutoMove [Human]`, and displays move execution timing while automation is
+running.
+
+### Human Mode
+
+Human mode is automatic by design. It ignores saved ELO, delay, and fast-mode
+settings while preserving them for when you switch back to Legit or Blatant.
+
+Human mode uses:
+
+- Local Stockfish only.
+- MultiPV 4.
+- Automatic depth:
+  - 8 with at least 60 seconds on the clock.
+  - 6 from 20 to 60 seconds.
+  - 5 from 5 to 20 seconds.
+  - 4 below 5 seconds.
+  - Plus one extra depth level in complex positions.
+- Complexity scoring from `0` to `1`, based on MultiPV gaps, valid alternatives,
+  game phase, captures, mate threats, and forced-response signals.
+- Weighted random move selection among safe candidates.
+- Blunder filtering, normally excluding losses above 120 cp.
+- A tighter loss limit when clearly winning.
+- Forced best move selection for short mates, unique legal moves, and large
+  evaluation gaps.
+- Per-game state to avoid artificial chains of weak moves.
+- Clock-aware timing that subtracts engine time already spent.
+- Opening acceleration, with real variation so repeated moves do not use the
+  same constant delay.
+- Bullet-safe caps, including 30-180 ms behavior below 5 seconds.
+- Fallback timing when no clock is readable.
+
+Human settings intentionally show only:
+
+```text
+Strength, timing and forced premoves are automatic
 ```
-├── manifest.json              # Chrome Extension Manifest v3
-├── background.js              # Service worker (background)
-├── content.js                 # Entry point (injected on chess.com)
-├── styles.css                 # All UI styles
-└── modules/
-    ├── core-main.js           # Core engine: eval bar, automove, FEN extraction, Stockfish, GUI
-    ├── human-automove.js      # Human complexity, move selection, timing, forced-premoves policy
-    ├── stats-cheater.js       # Opponent stats panel + cheater finder
-    ├── eval-tools.js          # Eval toggle button injection
-    ├── auto-modules.js        # URL change / SPA navigation hooks
-    └── tools-gui.js           # HUD hotkey binding (right Shift)
-```
+
+### Premoves
+
+Premoves are guarded to reduce invalid or suspicious behavior.
+
+- Legit can use configurable smart premoves.
+- Human enables premoves only for verified recaptures or forced replies.
+- A Human premove requires a clearly dominant opponent move, a stable reply
+  across plausible lines, and a very small reply set after simulation.
+- Before sending, the extension rechecks the current FEN, legal move, board
+  context, and page state.
+- Pending premoves are invalidated on navigation, mode changes, game changes,
+  and mismatched positions.
+
+### Promotion Handling
+
+AutoMove supports pawn promotion with a dedicated path:
+
+- Sends only the source and destination board clicks for promotion moves.
+- Selects the requested promotion piece explicitly after the selector opens.
+- Supports common Chess.com selector layouts, including shadow DOM.
+- Retries only the piece selection, not the pawn move, so the selector does not
+  open and immediately close.
+- Invalidates stale promotion choices after navigation or mode changes.
+
+### Puzzle Rush Solver
+
+Puzzle Rush automation uses Stockfish with configurable depth and a fallback
+search path for stuck positions.
+
+### AutoPlay
+
+AutoPlay watches the end screen and can:
+
+- Start a fresh match after a game ends.
+- Optionally accept incoming rematches.
+- Prefer "New Game" style actions over generic rematch buttons when configured.
+- Survive React node replacement on Chess.com end screens.
+- Avoid repeatedly clicking the same stale action token too quickly.
 
 ---
 
-## 🚀 Installation
+## Interface
 
-> This extension is not published on the Chrome Web Store. Install it manually in developer mode.
+Open the Tools GUI with:
 
-1. **Clone or download** this repository:
+- Right Shift.
+- The floating `Tools` button.
+
+The HUD includes:
+
+- `ALL`, `FAVORITE`, and `SETTINGS` tabs.
+- Runtime module toggles.
+- Per-module settings panels.
+- Favorites.
+- Dragging with pointer capture.
+- Compact status badges.
+- AutoMove mode badge.
+- Timers for AutoMove, Puzzle Rush, and AutoPlay.
+
+### Themes
+
+Available interface themes:
+
+| Theme | Description |
+| --- | --- |
+| Maia Classic | Modern emerald rounded interface. |
+| Blockcraft Classic | Pixel/voxel utility-client style. |
+| Voidtech Neon | Angular cyan technical overlay. |
+| Claude | Warm minimal interface. |
+| Verdant | Compact dark vertical client with grouped sections. |
+
+Verdant has its own grouped layout and cycles the compact AutoMove mode control
+through Legit, Blatant, and Human.
+
+---
+
+## Configuration
+
+Settings are persisted in `localStorage` under:
+
+```text
+cse_mod_state_v1
+```
+
+Main settings include:
+
+| Setting | Notes |
+| --- | --- |
+| AutoMove mode | `legit`, `blatant`, or `human`. Unknown saved values fall back safely. |
+| Maia strength | Used by Legit mode. Saved but ignored by Human. |
+| Delay min/max | Used by Legit and Blatant. Saved but ignored by Human. |
+| Fast when low time | Manual speed-up option outside Human's automatic timing. |
+| Fast in opening | Manual opening speed-up option outside Human's automatic timing. |
+| Smart premoves | Manual premove option outside Human's forced-premove policy. |
+| AutoMove hotkey | Configurable toggle hotkey. |
+| Suggest Move depth | Depth for arrows and hints. |
+| Suggest Move hotkey | Configurable suggestion toggle hotkey. |
+| Puzzle Rush depth | Depth for puzzle solving. |
+| AutoPlay rematch | Allows or blocks rematch acceptance. |
+| Engine provider | Local Stockfish or Stockfish Online API. |
+| Eval display | Bar or percent display. |
+| General language | English or Italian. |
+| Number format | Default or European formatting. |
+| UI theme | Maia Classic, Blockcraft, Voidtech, Claude, or Verdant. |
+| Notifications | Toggles for move sent, premove queued, game finished, analysis warnings, and similar events. |
+
+---
+
+## Project Structure
+
+```text
+.
+|-- manifest.json
+|-- background.js
+|-- content.js
+|-- offscreen.html
+|-- offscreen.js
+|-- styles.css
+|-- modules/
+|   |-- core-main.js
+|   |-- human-automove.js
+|   |-- game-insights.js
+|   |-- stats-cheater.js
+|   |-- eval-tools.js
+|   |-- auto-modules.js
+|   |-- tools-gui.js
+|   |-- stockfish/
+|   `-- maia/
+`-- tests/
+    |-- autoplay-regression.test.js
+    |-- human-automove.test.js
+    |-- maia-regression.test.js
+    |-- promotion-regression.test.js
+    `-- verdant-ui.test.js
+```
+
+### Key Files
+
+| File | Purpose |
+| --- | --- |
+| `modules/core-main.js` | Main HUD, engine orchestration, board/FEN handling, AutoMove, Puzzle Rush, AutoPlay, settings. |
+| `modules/human-automove.js` | Human complexity scoring, move selection, timing budget, forced-premove policy. |
+| `modules/game-insights.js` | Move-quality tracking, badges, recap state. |
+| `modules/stats-cheater.js` | Opponent stats and Cheater Finder panels. |
+| `offscreen.js` | Offscreen engine support and worker keepalive path. |
+| `styles.css` | HUD, panels, themes, eval bar, and Chess.com overlays. |
+
+---
+
+## Installation
+
+1. Clone or download this repository.
+
    ```bash
    git clone https://github.com/YOUR_USERNAME/chess-opponent-stats.git
    ```
 
-2. Open Chrome and navigate to `chrome://extensions/`
+2. Open Chrome.
 
-3. Enable **Developer mode** (toggle in the top-right corner)
+3. Go to:
 
-4. Click **Load unpacked** and select the root folder of this repository
+   ```text
+   chrome://extensions/
+   ```
 
-5. Navigate to [chess.com](https://www.chess.com) — the extension activates automatically
+4. Enable `Developer mode`.
+
+5. Click `Load unpacked`.
+
+6. Select the repository root folder.
+
+7. Open Chess.com.
+
+After editing files locally, reload the unpacked extension from
+`chrome://extensions/` and refresh the Chess.com tab.
 
 ---
 
-## 🎮 Usage
+## Usage
 
 | Action | How |
-|---|---|
-| View opponent stats | Click the **📊** button next to any username |
-| Analyze for cheating | Click the **🕵️** button next to any username |
-| Open Tools GUI | Press **Right Shift** or click the `Tools` floating button |
-| Toggle Eval Bar | Open Tools GUI → enable *Evaluation Bar* |
-| Toggle AutoMove | Open Tools GUI → enable *Auto Move* |
-| Toggle move arrows | Open Tools GUI → enable *Suggest Move* |
+| --- | --- |
+| Open Tools GUI | Press Right Shift or click `Tools`. |
+| View opponent stats | Click the stats button next to a username. |
+| Run Cheater Finder | Click the detective button next to a username. |
+| Enable eval bar | Tools GUI -> Evaluation Bar. |
+| Enable top-move arrows | Tools GUI -> Suggest Move. |
+| Enable AutoMove | Tools GUI -> AutoMove. |
+| Change AutoMove mode | AutoMove settings -> Legit, Blatant, or Human. |
+| Enable Game Insights | Tools GUI -> Game Insights. |
+| Enable AutoPlay | Tools GUI -> AutoPlay. |
 
 ---
 
-## ⚙️ Configuration
+## Diagnostics
 
-All settings are accessible through the **Tools GUI** and are automatically persisted via `localStorage`:
+The extension writes diagnostic logs for engine and automation behavior. Human
+AutoMove logs include:
 
-| Setting | Description |
-|---|---|
-| `AutoMove Mode` | `blatant` (instant), `legit` (Maia + configured delay), or `human` (fully automatic) |
-| `Delay Min / Max` | Range in seconds for Legit and Blatant; retained but ignored by Human |
-| `Fast when low time` | Speed up automove when clock < 30s |
-| `Fast in opening` | Speed up during first 8 full moves |
-| `Smart Premoves` | Queue premoves in forced tactical lines |
-| `Suggest Move Depth` | Stockfish depth for arrows / hints (default: 15) |
-| `Puzzle Rush Depth` | Stockfish depth for puzzle solving (default: 20) |
-| `Eval Bar Display` | `bar` or `percent` |
-| `Stockfish Auto-Reload` | Auto-restart engine on failure |
-| `Engine Provider` | `local` (default) or `api` |
-| `General Language` | `English` or `Italiano` |
-| `Numbers Format` | `Default (1,234.56)` or `European (1.234,56)` |
+- Mode.
+- Position complexity.
+- Clock remaining.
+- Computed time budget.
+- Engine time already consumed.
+- Selected move.
+- Centipawn loss.
+- Move-selection reason.
+- Premove decision and reason.
+- Promotion selection attempts.
 
----
-
-## 🧠 How It Works
-
-- **FEN Extraction**: Reads the current board position by scanning the DOM for `chess-board`, `wc-chess-board`, `[data-fen]`, and move list `[data-ply]` attributes, then reconstructs a valid FEN string including castling rights and turn.
-- **Stockfish Integration**: Uses local bundled Stockfish by default and can switch to the [Stockfish Online REST API](https://stockfish.online). Results are cached for 12 seconds to avoid redundant requests.
-- **Human AutoMove**: Always uses local Stockfish with MultiPV 4. Base depth is 8 at 60+ seconds, 6 at 20–60, 5 at 5–20, and 4 below 5 seconds, plus one level for complex positions. It keeps a 12% clock reserve, subtracts engine time from the total think budget, and uses a 0.3–4 second fallback when no clock can be read.
-- **Human diagnostics**: AutoMove logs include mode, position complexity, remaining clock, computed budget, engine time, selected move, centipawn loss, and any premove reason.
-- **Stats API**: Fetches data from the public [Chess.com API](https://api.chess.com) (`/pub/player/{username}/stats` and `/games/archives`). All responses are cached in-memory for 5 minutes.
-- **SPA Navigation**: A `MutationObserver` on `document` watches for URL changes and resets all state (eval cache, move overlays, premove schedules) on navigation.
-- **State Persistence**: Module states, settings, and eval bar position are serialized to `localStorage` under the key `cse_mod_state_v1` and restored on page load.
+These logs are intended for debugging timing, premove, online-board, promotion,
+and engine issues.
 
 ---
 
-## 🔒 Permissions
+## Tests
+
+The project uses Node's built-in test runner.
+
+Run the full suite:
+
+```bash
+node --test tests/*.test.js
+```
+
+Current regression coverage includes:
+
+- Human mode depth, timing bands, move choice, forced lines, premoves, settings,
+  online context, and GUI mode/timing display.
+- Maia worker lifecycle, search IDs, castling conversion, timeout recovery, and
+  offscreen keepalive.
+- Promotion execution and selector retry behavior.
+- AutoPlay end-screen handling.
+- Verdant theme layout and three-mode AutoMove cycle.
+
+---
+
+## Permissions
 
 | Permission | Reason |
-|---|---|
-| `activeTab` | Read the Chess.com DOM to extract game state |
-| `storage` | Persist extension settings |
-| `https://www.chess.com/*` | Inject content scripts and interact with the page |
-| `https://api.chess.com/*` | Fetch player stats and game archives |
-| `https://stockfish.online/*` | Query the Stockfish engine API |
+| --- | --- |
+| `activeTab` | Read the active Chess.com page and board state. |
+| `storage` | Persist extension state and settings. |
+| `offscreen` | Keep engine work available through the MV3 offscreen path. |
+| `https://www.chess.com/*` | Inject scripts and interact with Chess.com pages. |
+| `https://api.chess.com/*` | Fetch public player stats and archived games. |
+| `https://stockfish.online/*` | Optional online Stockfish API provider. |
 
 ---
 
-## ⚠️ Disclaimer
+## Tech Stack
 
-This extension is built for **educational and personal use only**. Using automation tools, move engines, or cheating detection features in real games on Chess.com may violate their [Terms of Service](https://www.chess.com/legal/user-agreement). Use responsibly.
-
----
-
-## 🛠️ Tech Stack
-
-- Vanilla JavaScript (ES2020+), no build step required
-- Chrome Extension Manifest v3
-- Bundled Stockfish.js worker (local engine)
-- [Stockfish Online API](https://stockfish.online)
-- [Chess.com Public API](https://www.chess.com/news/view/published-data-api)
+- Chrome Extension Manifest V3.
+- Vanilla JavaScript.
+- No bundler and no build step.
+- Local Stockfish worker.
+- Local Maia/Zerofish engine and bundled Maia weights.
+- Chess.com public API.
+- Node test runner.
 
 ---
 
-## 📄 License
+## Disclaimer
 
-MIT License — see [LICENSE](LICENSE) for details.
+This project is for personal and educational use. Engine assistance, automated
+move execution, premoves, puzzle solving, and similar automation may violate
+Chess.com's rules in live games. Use responsibly and understand the platform's
+terms before enabling automation features.

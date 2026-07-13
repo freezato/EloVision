@@ -566,6 +566,7 @@ let automovePositionStartedAt = 0;
 let automoveLastExecutionMs = null;
 let automoveBlockedKey = null;
 let automoveBlockedUntil = 0;
+let promotionChoiceSeq = 0;
 let premoveTimeout = null;
 let premoveScheduledAt = 0;
 let premoveDelayMs = 0;
@@ -602,6 +603,10 @@ let humanGameState = {
   selectedMeta: null,
   previousSuboptimal: false,
   engineDeadlineJitter: 1,
+  timingPositionKey: null,
+  timingStyle: 'normal',
+  timingPauseRandom: 0.5,
+  timingStyleHistory: [],
 };
 
 function isSameFenBoardAndTurn(fenA, fenB) {
@@ -1369,6 +1374,10 @@ function resetHumanGameState(token = null) {
     selectedMeta: null,
     previousSuboptimal: false,
     engineDeadlineJitter: 1,
+    timingPositionKey: null,
+    timingStyle: 'normal',
+    timingPauseRandom: 0.5,
+    timingStyleHistory: [],
   };
 }
 
@@ -1386,7 +1395,7 @@ function syncHumanPositionState(fen) {
     humanGameState.positionStartedAt = now();
     humanGameState.selectedMove = null;
     humanGameState.selectedMeta = null;
-    humanGameState.engineDeadlineJitter = 0.85 + (Math.random() * 0.30);
+    humanGameState.engineDeadlineJitter = 0.65 + (Math.random() * 0.70);
     automoveLog('human position appeared', { mode: 'human', fen: positionKey, token });
   }
   return humanGameState;
@@ -1877,12 +1886,51 @@ function computeHumanAutomoveTiming(boardEl, playerSide, turn) {
     pieceCount: countFenPieces(lastEvalFen),
   }) || { budgetSec: 0.3, band: 'fallback', reserveSec: null, movesRemaining: null };
   const engineElapsedSec = state.positionStartedAt ? Math.max(0, (now() - state.positionStartedAt) / 1000) : 0;
+  const positionKey = getFenBoardAndTurn(lastEvalFen);
+  if (state.timingPositionKey !== positionKey) {
+    const styles = ['fast', 'normal', 'slow'];
+    const history = Array.isArray(state.timingStyleHistory) ? state.timingStyleHistory : [];
+    const lastTwoSame = history.length >= 2 && history[history.length - 1] === history[history.length - 2];
+    const available = lastTwoSame ? styles.filter(style => style !== history[history.length - 1]) : styles;
+    state.timingStyle = available[Math.floor(Math.random() * available.length)] || 'normal';
+    state.timingPauseRandom = Math.random();
+    state.timingPositionKey = positionKey;
+    history.push(state.timingStyle);
+    if (history.length > 8) history.splice(0, history.length - 8);
+    state.timingStyleHistory = history;
+  }
+
+  const fullmove = getReliableFullmoveNumber();
+  const isOpening = Number.isFinite(fullmove) && fullmove <= 10;
+  const styleMultiplier = state.timingStyle === 'fast' ? 0.76 : state.timingStyle === 'slow' ? 1.30 : 1;
+  let pauseMinSec;
+  let pauseMaxSec;
+  if (Number.isFinite(ownClockSec) && ownClockSec < 5) {
+    pauseMinSec = state.timingStyle === 'fast' ? 0 : state.timingStyle === 'slow' ? 0.025 : 0.008;
+    pauseMaxSec = state.timingStyle === 'fast' ? 0.008 : state.timingStyle === 'slow' ? 0.060 : 0.025;
+  } else if (isOpening) {
+    pauseMinSec = state.timingStyle === 'fast' ? 0.010 : state.timingStyle === 'slow' ? 0.250 : 0.080;
+    pauseMaxSec = state.timingStyle === 'fast' ? 0.070 : state.timingStyle === 'slow' ? 0.550 : 0.220;
+  } else {
+    pauseMinSec = state.timingStyle === 'fast' ? 0.020 : state.timingStyle === 'slow' ? 0.450 : 0.150;
+    pauseMaxSec = state.timingStyle === 'fast' ? 0.120 : state.timingStyle === 'slow' ? 0.950 : 0.400;
+  }
+  const postEnginePauseSec = pauseMinSec + ((pauseMaxSec - pauseMinSec) * state.timingPauseRandom);
+  const totalCapSec = Number.isFinite(timing.capSec) ? timing.capSec : 4;
+  const variedBudgetSec = Math.min(totalCapSec, Math.max(
+    timing.budgetSec * styleMultiplier,
+    engineElapsedSec + postEnginePauseSec,
+  ));
   return {
     ...timing,
+    baseBudgetSec: timing.budgetSec,
+    budgetSec: variedBudgetSec,
     ownClockSec,
     complexity: analysis.complexity,
     engineElapsedSec,
-    remainingDelaySec: api?.getRemainingDelaySeconds(timing.budgetSec, engineElapsedSec) ?? Math.max(0, timing.budgetSec - engineElapsedSec),
+    timingStyle: state.timingStyle,
+    postEnginePauseSec,
+    remainingDelaySec: api?.getRemainingDelaySeconds(variedBudgetSec, engineElapsedSec) ?? Math.max(0, variedBudgetSec - engineElapsedSec),
   };
 }
 
@@ -2094,6 +2142,115 @@ function clearAutomoveSchedule(clearTimer = true) {
   }
 }
 
+function getPromotionMoverColor(fen, fromSq) {
+  const board = expandFenBoard(String(fen || '').trim().split(/\s+/)[0] || '');
+  return board ? getPieceColor(pieceAtFenSquare(board, fromSq)) : null;
+}
+
+function getPromotionPieceNames(promotion) {
+  return {
+    q: ['queen', 'regina', 'donna'],
+    r: ['rook', 'torre'],
+    b: ['bishop', 'alfiere'],
+    n: ['knight', 'cavallo']
+  }[promotion] || [];
+}
+
+function findPromotionChoiceNode(promotion, moverColor, boardEl = getBoardElement()) {
+  if (!/^[qrbn]$/.test(promotion || '')) return null;
+  const pieceCode = moverColor && /^[wb]$/.test(moverColor) ? `${moverColor}${promotion}` : null;
+  const names = getPromotionPieceNames(promotion);
+  const roots = [boardEl?.shadowRoot, boardEl, document].filter(Boolean);
+  const nodes = [];
+  const seen = new Set();
+  const selector = [
+    'button',
+    '[role="button"]',
+    '[data-piece]',
+    '[data-figurine]',
+    '[class*="promotion"] [class]',
+    '[class*="promotion-piece"]',
+    'wc-promotion-piece'
+  ].join(',');
+
+  for (const root of roots) {
+    let found = [];
+    try { found = Array.from(root.querySelectorAll(selector)); } catch {}
+    for (const node of found) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      nodes.push(node);
+    }
+  }
+
+  let best = null;
+  for (const node of nodes) {
+    if (!isElementRenderable(node)) continue;
+    const className = typeof node.className === 'string' ? node.className : String(node.className || '');
+    const dataPiece = normalizeActionText(node.getAttribute?.('data-piece'));
+    const dataFigurine = normalizeActionText(node.getAttribute?.('data-figurine'));
+    const descriptor = normalizeActionText([
+      className,
+      dataPiece,
+      dataFigurine,
+      node.getAttribute?.('aria-label'),
+      node.getAttribute?.('title'),
+      node.textContent
+    ].filter(Boolean).join(' '));
+    const classTokens = className.toLowerCase().split(/\s+/).filter(Boolean);
+    let promotionContext = false;
+    try {
+      promotionContext = !!node.closest?.(
+        '[class*="promotion"], [data-cy*="promotion"], [aria-label*="promotion" i], wc-promotion-window'
+      );
+    } catch {}
+
+    let score = 0;
+    if (pieceCode && dataPiece === pieceCode) score += 180;
+    if (dataPiece === promotion) score += promotionContext ? 130 : 20;
+    if (pieceCode && classTokens.includes(pieceCode)) score += 160;
+    if (classTokens.includes(promotion)) score += promotionContext ? 100 : 10;
+    if (dataFigurine === promotion || (pieceCode && dataFigurine === pieceCode)) score += 140;
+    if (names.some(name => new RegExp(`(^|[^a-z])${name}([^a-z]|$)`, 'i').test(descriptor))) score += 125;
+    if (promotionContext) score += 35;
+    if (!promotionContext && score < 140) continue;
+    if (!best || score > best.score) best = { node, score, descriptor };
+  }
+  return best;
+}
+
+function trySelectPromotionChoice(promotion, moverColor, boardEl, move) {
+  const match = findPromotionChoiceNode(promotion, moverColor, boardEl);
+  if (!match) return false;
+  try {
+    match.node.click();
+    automoveLog('promotion choice selected', {
+      move,
+      promotion,
+      color: moverColor,
+      score: match.score,
+      target: match.descriptor
+    });
+    return true;
+  } catch (err) {
+    automoveLog('promotion choice click failed', String(err?.message || err));
+    return false;
+  }
+}
+
+function schedulePromotionChoice(promotion, moverColor, boardEl, move) {
+  const seq = ++promotionChoiceSeq;
+  const pageUrl = location.href;
+  for (const delayMs of [35, 80, 150, 260, 420, 650]) {
+    setTimeout(() => {
+      if (seq !== promotionChoiceSeq || location.href !== pageUrl) return;
+      if (!boardEl?.isConnected || getBoardElement() !== boardEl) return;
+      if (!trySelectPromotionChoice(promotion, moverColor, boardEl, move)) return;
+      if (seq === promotionChoiceSeq) promotionChoiceSeq++;
+    }, delayMs);
+  }
+}
+
 function updateAutomoveButtonState() {
   const autoTimerEl = document.getElementById('cse-mc-timer-automove');
   const puzzleTimerEl = document.getElementById('cse-mc-timer-puzzlerush');
@@ -2132,6 +2289,9 @@ function executeAutomoveMove(bestMove) {
   const fromSq = bestMove.substring(0, 2);
   const toSq = bestMove.substring(2, 4);
   const promotion = bestMove.length >= 5 ? bestMove[4].toLowerCase() : undefined;
+  const moverColor = promotion
+    ? (getPromotionMoverColor(automoveTargetFen || lastEvalFen, fromSq) || getPlayerSide(boardEl))
+    : null;
   const rect = boardEl.getBoundingClientRect();
   const flipped = isBoardFlipped(boardEl);
   const fromPt = squareToViewportPoint(fromSq, rect, flipped);
@@ -2155,6 +2315,7 @@ function executeAutomoveMove(bestMove) {
           const out = fn.apply(target, args);
           automoveLog('internal api attempt', method, args, out);
           if (out === false) continue;
+          if (promotion) schedulePromotionChoice(promotion, moverColor, boardEl, bestMove);
           return true;
         } catch {}
       }
@@ -2181,6 +2342,22 @@ function executeAutomoveMove(bestMove) {
     target.dispatchEvent(evt);
     return true;
   };
+
+  if (promotion) {
+    // A second drag/click while the promotion window is open closes it on
+    // chess.com. Use one click-to-move gesture, then click only the requested
+    // piece as soon as the selector is rendered.
+    dispatchAtPoint('click', fromPt, 0);
+    dispatchAtPoint('click', toPt, 0);
+    schedulePromotionChoice(promotion, moverColor, boardEl, bestMove);
+    automoveLog('promotion move sent; waiting for piece selector', {
+      fromSq,
+      toSq,
+      promotion,
+      moverColor
+    });
+    return true;
+  }
 
   // Try pointer + drag-like interaction first.
   dispatchAtPoint('pointermove', fromPt, 0);
@@ -2365,6 +2542,8 @@ async function performAutomove() {
     engineElapsedMs: humanTiming ? Math.round(humanTiming.engineElapsedSec * 1000) : null,
     reserveSec: humanTiming?.reserveSec ?? null,
     clockBand: humanTiming?.band || null,
+    timingStyle: humanTiming?.timingStyle || null,
+    postEnginePauseMs: humanTiming ? Math.round(humanTiming.postEnginePauseSec * 1000) : null,
     lossCp: automovePlannedMeta?.lossCp ?? null,
     topMoves: (lastEvalTopMoves || []).slice(0, 4)
   });
@@ -2410,11 +2589,17 @@ async function performAutomove() {
       clearAutomoveSchedule();
       return;
     }
-    const sent = executeAutomoveMove(automovePlannedMove);
-    const executionMs = sent ? finishAutomoveTiming(automoveTargetFen) : null;
+    const dispatchedMove = automovePlannedMove;
+    const dispatchedFen = automoveTargetFen;
+    const dispatchedPromotion = dispatchedMove?.length >= 5 ? dispatchedMove[4].toLowerCase() : null;
+    const dispatchedPromotionColor = dispatchedPromotion
+      ? (getPromotionMoverColor(dispatchedFen, dispatchedMove.slice(0, 2)) || side)
+      : null;
+    const sent = executeAutomoveMove(dispatchedMove);
+    const executionMs = sent ? finishAutomoveTiming(dispatchedFen) : null;
     automoveLog('move dispatched', {
       mode: automoveMode,
-      move: automovePlannedMove,
+      move: dispatchedMove,
       sent,
       complexity: automovePlannedMeta?.complexity ?? null,
       lossCp: automovePlannedMeta?.lossCp ?? null,
@@ -2422,14 +2607,16 @@ async function performAutomove() {
       executionMs,
     });
     if (!sent) {
-      blockAutomoveFor(automoveTargetFen, automovePlannedMove, 2200);
+      blockAutomoveFor(dispatchedFen, dispatchedMove, 2200);
       clearAutomoveSchedule();
       return;
     }
     commitHumanMoveState(automovePlannedMeta);
 
-    // Verify if turn changed; if not, try one more time quickly.
-    sleep(220).then(() => {
+    // Promotion controls render asynchronously. Give them enough time and never
+    // replay the pawn move over an open selector; retry only the piece choice.
+    const verificationDelayMs = dispatchedPromotion ? 850 : 220;
+    sleep(verificationDelayMs).then(() => {
       const turnAfter = detectSideToMove();
       const stillEnabled = profile === 'puzzleRush' ? isPuzzleRushEnabled : isAutomoveEnabled;
       if (!stillEnabled) {
@@ -2446,12 +2633,26 @@ async function performAutomove() {
         clearAutomoveSchedule();
         return;
       }
+      if (dispatchedPromotion) {
+        const selected = trySelectPromotionChoice(
+          dispatchedPromotion,
+          dispatchedPromotionColor,
+          currentBoard,
+          dispatchedMove
+        );
+        automoveLog(selected
+          ? 'promotion retry: piece choice clicked'
+          : 'promotion retry: selector not found; pawn move was not repeated');
+        blockAutomoveFor(dispatchedFen, dispatchedMove, 2200);
+        clearAutomoveSchedule();
+        return;
+      }
       automoveLog('retry: turn unchanged after first dispatch');
-      const retrySent = executeAutomoveMove(automovePlannedMove);
+      const retrySent = executeAutomoveMove(dispatchedMove);
       if (!retrySent) {
         automoveLog('retry failed: dispatch not sent');
       }
-      blockAutomoveFor(automoveTargetFen, automovePlannedMove, 2200);
+      blockAutomoveFor(dispatchedFen, dispatchedMove, 2200);
       clearAutomoveSchedule();
     });
   }, automoveDelayMs);
@@ -5362,6 +5563,7 @@ function setAutomoveEnabled(enabled) {
   if (isAutomoveEnabled === next) return;
   isAutomoveEnabled = next;
   if (!isAutomoveEnabled) {
+    promotionChoiceSeq++;
     clearAutomoveSchedule();
     clearPremoveSchedule();
     resetAutomoveTimingState(false);
@@ -5683,6 +5885,7 @@ function cseRenderSettingsPanel(modId) {
         lastEvalTopMoves = [];
         lastEvalPvLines = [];
         lastEvalMate = null;
+        promotionChoiceSeq++;
         clearAutomoveSchedule();
         clearPremoveSchedule();
         resetAutomoveTimingState(true);
@@ -6282,6 +6485,7 @@ let lastUrl = location.href;
 new MutationObserver(() => {
   if (location.href !== lastUrl) {
     lastUrl = location.href;
+    promotionChoiceSeq++;
     playerSideCache = { side: null, ts: 0 };
     lastLoggedPlayerSide = null;
     lastEvalFen = null;
