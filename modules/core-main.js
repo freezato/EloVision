@@ -86,7 +86,20 @@ let isPuzzleRushEnabled = false;
 let isAutoPlayEnabled = false;
 let isToxicChatEnabled = false;
 let isGameInsightsEnabled = false;
+let isPostGameCoachEnabled = false;
 let isGameFlowEnabled = false;
+
+function isGameReviewAnalysisEnabled() {
+  return isGameInsightsEnabled || isPostGameCoachEnabled;
+}
+
+function syncGameReviewModules() {
+  const analysisEnabled = isGameReviewAnalysisEnabled();
+  window.CSEGameInsights?.setEnabled?.(analysisEnabled);
+  window.CSEGameInsights?.setLiveUiEnabled?.(isGameInsightsEnabled);
+  window.CSEPostGameCoach?.setEnabled?.(isPostGameCoachEnabled);
+  window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
+}
 let gameFlowSettings = window.CSEGameFlow?.normalizeSettings?.() || {
   acceptDraws: true,
   offerDraws: true,
@@ -156,6 +169,7 @@ function cseSaveState() {
       AutoPlay: !!isAutoPlayEnabled,
       ToxicChat: !!isToxicChatEnabled,
       GameInsights: !!isGameInsightsEnabled,
+      PostGameCoach: !!isPostGameCoachEnabled,
       GameFlow: !!isGameFlowEnabled,
       SuggestMove: !!arrowsEnabled,
       EvaluationBar: !!isEvalBarEnabled,
@@ -4043,11 +4057,11 @@ async function runLocalMaiaEval(fen, _queryDepth, signal) {
 
 const gameInsightsStockfishJobs = new Map();
 function queueGameInsightsStockfishEval(fen, ply) {
-  if (!isGameInsightsEnabled || !fen || gameInsightsStockfishJobs.has(fen)) return;
+  if (!isGameReviewAnalysisEnabled() || !fen || gameInsightsStockfishJobs.has(fen)) return;
   const depth = Math.max(4, Math.min(6, suggestMoveDepth));
   const job = runLocalStockfishEval(fen, depth, null)
     .then(result => {
-      if (!result || !isGameInsightsEnabled) return;
+      if (!result || !isGameReviewAnalysisEnabled()) return;
       window.CSEGameInsights?.handleEval?.({
         fen,
         ply,
@@ -4056,6 +4070,7 @@ function queueGameInsightsStockfishEval(fen, ply) {
         bestMove: result.bestMove || null,
         topMoves: Array.isArray(result.topMoves) ? result.topMoves.slice(0, 4) : [],
         gameOver: isGameOverVisible(),
+        playerSide: getPlayerSide(getBoardElement()),
       });
     })
     .catch(() => {})
@@ -4162,7 +4177,7 @@ function getEvalQueryDepth(fen = lastEvalFen) {
   }
 
   // Game Insights only needs a stable shallow score for live classification.
-  if (isGameInsightsEnabled && !isEvalBarEnabled && !arrowsEnabled) {
+  if (isGameReviewAnalysisEnabled() && !isEvalBarEnabled && !arrowsEnabled) {
     return Math.max(4, Math.min(7, suggestMoveDepth));
   }
 
@@ -4302,7 +4317,7 @@ async function fetchEval(fen) {
   if (activeEngineId === 'maia') {
     // Maia is local-only: do not replace a slow/failed Maia response with
     // Stockfish or the remote API, which made latency and behavior inconsistent.
-    if (!isGameInsightsEnabled) releaseLocalStockfishEngine();
+    if (!isGameReviewAnalysisEnabled()) releaseLocalStockfishEngine();
     try {
       const maiaResult = await runLocalMaiaEval(fen, queryDepth, signal);
       if (maiaResult) {
@@ -4919,6 +4934,7 @@ function applySavedGuiAndModuleState() {
     isGameFlowEnabled = !!saved.modules.GameFlow;
     isToxicChatEnabled = !!saved.modules.ToxicChat;
     isGameInsightsEnabled = !!saved.modules.GameInsights;
+    isPostGameCoachEnabled = !!saved.modules.PostGameCoach;
     arrowsEnabled = !!saved.modules.SuggestMove;
     isEvalBarEnabled = !!saved.modules.EvaluationBar;
     isGuiHudEnabled = !!saved.modules.GUI;
@@ -5063,7 +5079,7 @@ function clampToViewport(el, left, top) {
 }
 
 function isEvaluationEngineNeeded() {
-  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled || isGameInsightsEnabled || isGameFlowEnabled);
+  return !!(isEvalBarEnabled || arrowsEnabled || isAutomoveEnabled || isPuzzleRushEnabled || isGameReviewAnalysisEnabled() || isGameFlowEnabled);
 }
 
 function resetStockfishFailureTracking() {
@@ -5217,6 +5233,7 @@ function getActiveModuleHudEntries() {
     const mini = s ? ` M${s.moveCount} CPL ${s.avgCpl}` : ' live';
     entries.push({ key: 'GameInsights|' + mini, html: `GameInsights <span class="cse-gui-hud-timer">${mini}</span>` });
   }
+  if (isPostGameCoachEnabled) entries.push({ key: 'PostGameCoach', html: 'Post-game Coach <span class="cse-gui-hud-timer">armed</span>' });
   if (arrowsEnabled) entries.push({ key: 'SuggestMove', html: 'SuggestMove' });
   if (isEvalBarEnabled) entries.push({ key: 'EvaluationBar', html: 'EvaluationBar' });
   if (isGuiHudEnabled) entries.push({ key: 'GUI', html: 'GUI' });
@@ -5292,8 +5309,10 @@ function toggleCseGuiModule(mod) {
     }
   } else if (mod.id === 'GameInsights') {
     isGameInsightsEnabled = !isGameInsightsEnabled;
-    window.CSEGameInsights?.setEnabled?.(isGameInsightsEnabled);
-    window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
+    syncGameReviewModules();
+  } else if (mod.id === 'PostGameCoach') {
+    isPostGameCoachEnabled = !isPostGameCoachEnabled;
+    syncGameReviewModules();
   } else if (mod.id === 'SuggestMove') {
     setSuggestMoveEnabled(!arrowsEnabled);
     return;
@@ -5358,7 +5377,7 @@ function cseRenderVerdantGui(modal, allMods) {
   grid.innerHTML = `
     <div class="cse-verdant-scroll">
       ${renderSection('automation', 'Automation', ['AutoMove', 'AutoPlay', 'GameFlow', 'PuzzleRush'])}
-      ${renderSection('analysis', 'Analysis', ['EvaluationBar', 'SuggestMove', 'GameInsights'])}
+      ${renderSection('analysis', 'Analysis', ['EvaluationBar', 'SuggestMove', 'GameInsights', 'PostGameCoach'])}
       ${renderSection('interface', 'Interface', ['GUI', 'ToxicChat'])}
       ${renderSection('security', 'Security', [], '<div class="cse-verdant-note">Player protection tools run on demand.</div>')}
       <div class="cse-verdant-divider"><span>OTHER</span></div>
@@ -5863,6 +5882,7 @@ function cseRenderGui() {
     { id: 'GameFlow', label: 'GameFlow', active: isGameFlowEnabled, hasSettings: true },
     { id: 'ToxicChat', label: 'Toxic Chat', active: isToxicChatEnabled, hasSettings: true },
     { id: 'GameInsights', label: 'Game Insights', active: isGameInsightsEnabled, hasSettings: false },
+    { id: 'PostGameCoach', label: 'Post-game Coach', active: isPostGameCoachEnabled, hasSettings: false },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
@@ -6279,6 +6299,10 @@ function cseRenderGui() {
         color: '#6bb58b', bg: 'rgba(107,181,139,0.14)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19h16"/><path d="M7 16l3-4 3 2 4-6"/></svg>`
       },
+      PostGameCoach: {
+        color: '#5dcaa5', bg: 'rgba(93,202,165,0.14)',
+        svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="m9 10 2 2 4-4"/></svg>`
+      },
       SuggestMove: {
         color: '#5b8fc9', bg: 'rgba(91,143,201,0.15)',
         svg: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>`
@@ -6303,6 +6327,7 @@ function cseRenderGui() {
       GameFlow: 'Manage draws, resignations and rematches',
       ToxicChat: 'Send auto chat message',
       GameInsights: 'Live move quality and recap',
+      PostGameCoach: 'Detailed coaching report after each game',
       SuggestMove: 'Suggest the best moves',
       EvaluationBar: 'Show position evaluation',
       CheaterFinder: 'Detect engine assistance',
@@ -7399,9 +7424,11 @@ async function tickEvalBar() {
     bestMove: result?.bestMove || null,
     topMoves: Array.isArray(result?.topMoves) ? result.topMoves.slice(0, 4) : [],
     gameOver: gameOverVisible,
+    playerSide: getPlayerSide(getBoardElement()),
   });
   if (gameOverVisible) {
-    cseNotify('gameFinished', 'Game finished', 'Open Game Insights for the recap', { id: 'game-finished-' + getToxicChatGameToken(), cooldown: 60000, duration: 5200 });
+    const reviewMessage = isPostGameCoachEnabled ? 'Your Post-game Coach report is ready' : 'Open Game Insights for the recap';
+    cseNotify('gameFinished', 'Game finished', reviewMessage, { id: 'game-finished-' + getToxicChatGameToken(), cooldown: 60000, duration: 5200 });
   }
   if (prevFen && prevFen !== fen) {
     window.CSEGameInsights?.handleMove?.({
@@ -7476,8 +7503,7 @@ applySavedGuiAndModuleState();
 applyUiTheme();
 installModuleHotkeys();
 window.CSEGameInsights?.init?.();
-window.CSEGameInsights?.setEnabled?.(isGameInsightsEnabled);
-window.CSEGameInsights?.handleGameTransition?.(getToxicChatGameToken());
+syncGameReviewModules();
 if (isEvalBarEnabled) createEvaluationBarPanel();
 if (isAutomoveEnabled || isPuzzleRushEnabled) startAutomoveUiTicker();
 if (isAutoPlayEnabled) startAutoPlayTicker();
