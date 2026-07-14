@@ -9,6 +9,7 @@
 }
 [data-cse-theme="verdant"][data-cse-motion="on"] .cse-verdant-section.is-expanded > .cse-verdant-section-body {
   max-height:860px;padding-bottom:7px;opacity:1;transform:translateY(0);pointer-events:auto;
+  animation:cse-verdant-accordion-open .34s cubic-bezier(.22,.8,.25,1) both;
 }
 [data-cse-theme="verdant"][data-cse-motion="on"] .cse-verdant-section.is-collapsing > .cse-verdant-section-body {
   max-height:0;padding-bottom:0;opacity:0;transform:translateY(-5px);pointer-events:none;
@@ -43,6 +44,10 @@
 }
 [data-cse-theme="verdant"][data-cse-motion="on"] .cse-verdant-footer span:hover {
   color:#51cca6;transform:translateY(-2px) scale(1.08);
+}
+@keyframes cse-verdant-accordion-open {
+  from { max-height:0; padding-bottom:0; opacity:0; transform:translateY(-5px); }
+  to { max-height:860px; padding-bottom:7px; opacity:1; transform:translateY(0); }
 }
 @keyframes cse-verdant-item-in {
   from { opacity:0;transform:translateX(-7px); } to { opacity:1;transform:translateX(0); }
