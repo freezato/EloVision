@@ -4,6 +4,7 @@
   const state = {
     enabled: false,
     lastReview: null,
+    lastData: null,
     panel: null,
   };
 
@@ -161,6 +162,7 @@
     if (!state.enabled) return;
     const review = buildReview(data);
     state.lastReview = review;
+    state.lastData = data;
     removePanel();
 
     const panel = document.createElement('section');
@@ -218,9 +220,8 @@
     setEnabled,
     showReview,
     showLastReview() {
-      if (!state.enabled || !state.lastReview) return;
-      const data = window.CSEGameInsights?.getReviewData?.();
-      if (data) showReview(data);
+      if (!state.enabled || !state.lastData) return;
+      showReview(state.lastData);
     },
     close: removePanel,
   };
