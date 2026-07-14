@@ -5412,7 +5412,7 @@ function cseRenderVerdantGui(modal, allMods) {
         cseGuiState.verdantSections[id] = false;
         cseSaveState();
         cseRenderGui();
-      }, 190);
+      }, uiMotionEnabled ? 190 : 0);
     });
   });
   grid.querySelectorAll('[data-module-toggle]').forEach(button => {
