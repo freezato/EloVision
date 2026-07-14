@@ -5233,7 +5233,7 @@ function getActiveModuleHudEntries() {
     const mini = s ? ` M${s.moveCount} CPL ${s.avgCpl}` : ' live';
     entries.push({ key: 'GameInsights|' + mini, html: `GameInsights <span class="cse-gui-hud-timer">${mini}</span>` });
   }
-  if (isPostGameCoachEnabled) entries.push({ key: 'PostGameCoach', html: 'Post-game Coach <span class="cse-gui-hud-timer">armed</span>' });
+  if (isPostGameCoachEnabled) entries.push({ key: 'PostGameCoach', html: 'Post-game Coach' });
   if (arrowsEnabled) entries.push({ key: 'SuggestMove', html: 'SuggestMove' });
   if (isEvalBarEnabled) entries.push({ key: 'EvaluationBar', html: 'EvaluationBar' });
   if (isGuiHudEnabled) entries.push({ key: 'GUI', html: 'GUI' });
@@ -5476,6 +5476,7 @@ function cseBlockcraftModuleMeta(id) {
     GameFlow: ['flow', 'UTILITY', 'Handles draws, resignations and rematches using stable engine decisions.'],
     ToxicChat: ['chat', 'UTILITY', 'Sends your configured chat message at selected game moments.'],
     GameInsights: ['chart', 'ANALYTICS', 'Analyzes every move and provides accurate stats and insights.'],
+    PostGameCoach: ['book', 'ANALYTICS', 'Creates a detailed coaching report when the game ends.'],
     SuggestMove: ['down', 'GAMEPLAY', 'Suggests the best move using the current engine evaluation.'],
     EvaluationBar: ['bars', 'UI', 'Displays a classic evaluation bar on the side of the board.'],
     GUI: ['gui', 'UI', 'Customizes the layout and behavior of the in-game interface.'],
@@ -6817,7 +6818,8 @@ function cseRenderSettingsPanel(modId) {
   });
   const openCoachReport = ov.querySelector('#cse-sp-coach-open-last');
   if (openCoachReport) openCoachReport.addEventListener('click', () => {
-    window.CSEPostGameCoach?.showLastReview?.();
+    closeToolsGui();
+    window.setTimeout(() => window.CSEPostGameCoach?.showLastReview?.(), 280);
   });
 
   // Draggable settings panel
