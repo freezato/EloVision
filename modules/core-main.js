@@ -6528,6 +6528,8 @@ function cseBlockcraftSettingsMarkup(modId) {
     AutoPlay: isAutoPlayEnabled,
     GameFlow: isGameFlowEnabled,
     ToxicChat: isToxicChatEnabled,
+    GameInsights: isGameInsightsEnabled,
+    PostGameCoach: isPostGameCoachEnabled,
     EvaluationBar: isEvalBarEnabled,
     SuggestMove: arrowsEnabled,
   }[modId];
@@ -6609,6 +6611,13 @@ function cseBlockcraftSettingsMarkup(modId) {
       <section class="cse-bc-settings-box"><h3>TRIGGERS</h3>
         <label class="cse-bc-setting-row"><span><b>Send at game start</b><small>Post when a new game begins.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-toxic-start" ${toxicChatSendOnStart ? 'checked' : ''}></label>
         <label class="cse-bc-setting-row"><span><b>Send at game end</b><small>Post after the game finishes.</small></span><input class="cse-bc-check" type="checkbox" id="cse-sp-toxic-end" ${toxicChatSendOnEnd ? 'checked' : ''}></label>
+      </section>`;
+  } else if (modId === 'PostGameCoach') {
+    body = `
+      <section class="cse-bc-settings-box"><h3>POST-GAME REPORT</h3>
+        <div class="cse-bc-setting-row cse-bc-setting-stack"><span><b>Automatic review</b><small>A detailed coaching report is created when the game ends.</small></span>
+          <button type="button" class="cse-mc-mbtn cse-mc-mbtn-on" id="cse-sp-coach-open-last">OPEN LATEST REPORT</button>
+        </div>
       </section>`;
   } else if (modId === 'EvaluationBar') {
     body = `

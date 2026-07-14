@@ -127,34 +127,75 @@
   function makeMovable(panel) {
     const handle = panel.querySelector('.cse-coach-head');
     if (!handle) return;
+
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    const clampPosition = (left, top) => {
+      const visibleWidth = Math.min(110, panel.offsetWidth);
+      const minLeft = Math.min(8, visibleWidth - panel.offsetWidth);
+      const maxLeft = Math.max(8, window.innerWidth - visibleWidth);
+      const minTop = 8;
+      const maxTop = Math.max(minTop, window.innerHeight - 58);
+      return {
+        left: clamp(left, minLeft, maxLeft),
+        top: clamp(top, minTop, maxTop),
+      };
+    };
+
+    const onMove = event => {
+      if (event.pointerId !== pointerId) return;
+      const next = clampPosition(
+        startLeft + event.clientX - startX,
+        startTop + event.clientY - startY
+      );
+      panel.style.left = next.left + 'px';
+      panel.style.top = next.top + 'px';
+    };
+
+    const stop = event => {
+      if (pointerId === null || (event?.pointerId != null && event.pointerId !== pointerId)) return;
+      try {
+        if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+      } catch {}
+      pointerId = null;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+    };
+
     handle.addEventListener('pointerdown', event => {
       if (event.button !== 0 || event.target.closest('button')) return;
+      event.preventDefault();
+
       const rect = panel.getBoundingClientRect();
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const startLeft = rect.left;
-      const startTop = rect.top;
-      panel.style.left = startLeft + 'px';
-      panel.style.top = startTop + 'px';
+      panel.getAnimations?.().forEach(animation => {
+        try { animation.cancel(); } catch {}
+      });
+      panel.style.animation = 'none';
+      panel.style.transform = 'none';
       panel.style.right = 'auto';
       panel.style.bottom = 'auto';
-      panel.style.transform = 'none';
-      handle.setPointerCapture?.(event.pointerId);
+      panel.style.left = rect.left + 'px';
+      panel.style.top = rect.top + 'px';
 
-      const move = next => {
-        const left = clamp(startLeft + next.clientX - startX, 8, Math.max(8, innerWidth - panel.offsetWidth - 8));
-        const top = clamp(startTop + next.clientY - startY, 8, Math.max(8, innerHeight - panel.offsetHeight - 8));
-        panel.style.left = left + 'px';
-        panel.style.top = top + 'px';
-      };
-      const stop = () => {
-        handle.removeEventListener('pointermove', move);
-        handle.removeEventListener('pointerup', stop);
-        handle.removeEventListener('pointercancel', stop);
-      };
-      handle.addEventListener('pointermove', move);
-      handle.addEventListener('pointerup', stop);
-      handle.addEventListener('pointercancel', stop);
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      pointerId = event.pointerId;
+
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'grabbing';
+      try { handle.setPointerCapture?.(pointerId); } catch {}
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', stop);
+      window.addEventListener('pointercancel', stop);
     });
   }
 
