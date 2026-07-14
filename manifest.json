@@ -33,7 +33,8 @@
         "modules/tools-gui.js"
       ],
       "css": [
-        "styles.css"
+        "styles.css",
+        "verdant-motion.css"
       ],
       "run_at": "document_idle"
     }
