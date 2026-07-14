@@ -5882,7 +5882,7 @@ function cseRenderGui() {
     { id: 'GameFlow', label: 'GameFlow', active: isGameFlowEnabled, hasSettings: true },
     { id: 'ToxicChat', label: 'Toxic Chat', active: isToxicChatEnabled, hasSettings: true },
     { id: 'GameInsights', label: 'Game Insights', active: isGameInsightsEnabled, hasSettings: false },
-    { id: 'PostGameCoach', label: 'Post-game Coach', active: isPostGameCoachEnabled, hasSettings: false },
+    { id: 'PostGameCoach', label: 'Post-game Coach', active: isPostGameCoachEnabled, hasSettings: true },
     { id: 'SuggestMove', label: 'SuggestMove', active: arrowsEnabled, hasSettings: true },
     { id: 'EvaluationBar', label: 'Evaluation Bar', active: isEvalBarEnabled, hasSettings: true },
     { id: 'GUI', label: 'GUI', active: isGuiHudEnabled, hasSettings: false },
@@ -6655,6 +6655,7 @@ function cseRenderSettingsPanel(modId) {
   const isAutoPlay = modId === 'AutoPlay';
   const isGameFlow = modId === 'GameFlow';
   const isToxicChat = modId === 'ToxicChat';
+  const isPostGameCoach = modId === 'PostGameCoach';
   const isEvalBar = modId === 'EvaluationBar';
   const isDepth = modId === 'SuggestMove';
   ov.innerHTML = uiTheme === 'blockforge' ? cseBlockcraftSettingsMarkup(modId) : `
@@ -6754,6 +6755,13 @@ function cseRenderSettingsPanel(modId) {
             <span>Send at game end</span>
           </label>
         </div>
+      ` : isPostGameCoach ? `
+        <div class="cse-mc-srow">
+          <span class="cse-mc-slabel">Builds a detailed report automatically when the game ends.</span>
+        </div>
+        <div class="cse-mc-srow">
+          <button type="button" class="cse-mc-mbtn cse-mc-mbtn-on" id="cse-sp-coach-open-last">Open latest report</button>
+        </div>
       ` : isEvalBar ? `
         <div class="cse-mc-srow">
           <div class="cse-mc-slabel-row"><span class="cse-mc-slabel">Depth</span><span class="cse-mc-sval" id="cse-sp-depth-val">${suggestMoveDepth}</span></div>
@@ -6806,6 +6814,10 @@ function cseRenderSettingsPanel(modId) {
     if (e.target === ov) {
       closeSettingsPanel();
     }
+  });
+  const openCoachReport = ov.querySelector('#cse-sp-coach-open-last');
+  if (openCoachReport) openCoachReport.addEventListener('click', () => {
+    window.CSEPostGameCoach?.showLastReview?.();
   });
 
   // Draggable settings panel
