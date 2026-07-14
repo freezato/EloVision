@@ -5393,9 +5393,26 @@ function cseRenderVerdantGui(modal, allMods) {
   grid.querySelectorAll('[data-section-toggle]').forEach(button => {
     button.addEventListener('click', () => {
       const id = button.dataset.sectionToggle;
-      cseGuiState.verdantSections[id] = !cseGuiState.verdantSections[id];
-      cseSaveState();
-      cseRenderGui();
+      const section = button.closest('.cse-verdant-section');
+      const isExpanded = cseGuiState.verdantSections[id] !== false;
+      if (!isExpanded) {
+        cseGuiState.verdantSections[id] = true;
+        cseSaveState();
+        cseRenderGui();
+        return;
+      }
+
+      // Keep the current DOM in place long enough for Verdant's accordion
+      // close animation to finish before re-rendering the section.
+      if (section?.classList.contains('is-collapsing')) return;
+      section?.classList.add('is-collapsing');
+      button.setAttribute('aria-expanded', 'false');
+      button.disabled = true;
+      window.setTimeout(() => {
+        cseGuiState.verdantSections[id] = false;
+        cseSaveState();
+        cseRenderGui();
+      }, uiMotionEnabled ? 190 : 0);
     });
   });
   grid.querySelectorAll('[data-module-toggle]').forEach(button => {
