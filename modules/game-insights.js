@@ -17,7 +17,10 @@
 
   const state = {
     enabled: false,
+    liveUiEnabled: true,
     gameToken: null,
+    playerSide: null,
+    records: [],
     recapShownForToken: null,
     evalByFen: new Map(),
     analysedMoveKeys: new Set(),
@@ -147,6 +150,8 @@
     state.analysedMoveKeys.clear();
     state.badgeByPly.clear();
     state.pendingMoves.clear();
+    state.records = [];
+    state.playerSide = null;
     state.lastObservedPly = null;
     state.stats = createEmptyStats();
     if (state.syncFrame) cancelAnimationFrame(state.syncFrame);
@@ -160,7 +165,17 @@
   function setEnabled(enabled) {
     state.enabled = !!enabled;
     if (!state.enabled) reset();
-    else scheduleBadgeSync();
+    else if (state.liveUiEnabled) scheduleBadgeSync();
+  }
+
+  function setLiveUiEnabled(enabled) {
+    state.liveUiEnabled = !!enabled;
+    if (!state.liveUiEnabled) {
+      document.querySelectorAll('.cse-move-quality').forEach(el => el.remove());
+      removeRecap();
+      return;
+    }
+    if (state.enabled) scheduleBadgeSync();
   }
 
   function handleGameTransition(token) {
@@ -173,6 +188,8 @@
 
   function handleEval(snapshot) {
     if (!state.enabled || !snapshot || typeof snapshot !== 'object') return;
+    const side = normalizeTurn(snapshot.playerSide);
+    if (side) state.playerSide = side;
     if (Number.isFinite(snapshot.ply)) {
       if (Number.isFinite(state.lastObservedPly) && snapshot.ply + 1 < state.lastObservedPly) reset();
       state.lastObservedPly = snapshot.ply;
@@ -182,14 +199,22 @@
         cp: Number.isFinite(snapshot.cp) ? snapshot.cp : null,
         mate: Number.isFinite(snapshot.mate) ? snapshot.mate : null,
         bestMove: typeof snapshot.bestMove === 'string' ? snapshot.bestMove.toLowerCase() : null,
+        topMoves: Array.isArray(snapshot.topMoves)
+          ? snapshot.topMoves.map(move => String(move || '').toLowerCase()).filter(Boolean).slice(0, 4)
+          : [],
       });
       trimMap(state.evalByFen, MAX_EVALS);
       flushPendingMoves();
     }
-    scheduleBadgeSync();
+    if (state.liveUiEnabled) scheduleBadgeSync();
     if (snapshot.gameOver && state.gameToken && state.recapShownForToken !== state.gameToken) {
       state.recapShownForToken = state.gameToken;
-      setTimeout(showRecap, 0);
+      if (state.liveUiEnabled) setTimeout(showRecap, 0);
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('cse-game-review-ready', {
+          detail: getReviewData(),
+        }));
+      }, 80);
     }
   }
 
@@ -229,7 +254,7 @@
   }
 
   function syncMoveBadges() {
-    if (!state.enabled) return;
+    if (!state.enabled || !state.liveUiEnabled) return;
     const moves = getNotationMoves();
     for (const [ply, record] of state.badgeByPly) {
       const target = findNotationTarget(ply, moves);
@@ -248,7 +273,7 @@
   }
 
   function scheduleBadgeSync() {
-    if (!state.enabled || state.syncFrame) return;
+    if (!state.enabled || !state.liveUiEnabled || state.syncFrame) return;
     state.syncFrame = requestAnimationFrame(() => {
       state.syncFrame = 0;
       syncMoveBadges();
@@ -267,6 +292,7 @@
 
   function handlePositionChange(snapshot) {
     if (!state.enabled || !snapshot?.fenBefore || !snapshot?.fenAfter || !Number.isFinite(snapshot.ply)) return;
+    if (!state.liveUiEnabled) return;
     if (!state.badgeByPly.has(snapshot.ply)) {
       state.badgeByPly.set(snapshot.ply, { ply: snapshot.ply, cpl: null, bucket: 'pending' });
       trimMap(state.badgeByPly, MAX_BADGES);
@@ -312,7 +338,24 @@
     const phase = phaseFromFen(snapshot.fenAfter, snapshot.ply);
     s.phase[phase] += 1;
     if (bucket === 'brilliant' || bucket === 'blunder' || cpl >= 170) s.tacticalFlags += 1;
-    const record = { ply: snapshot.ply, cpl: Math.round(cpl), bucket, uci, phase };
+    const topMoves = Array.isArray(before.topMoves) ? before.topMoves : [];
+    const record = {
+      ply: snapshot.ply,
+      cpl: Math.round(cpl),
+      bucket,
+      uci,
+      playedMove: uci,
+      bestMove: before.bestMove || null,
+      humanMove: topMoves.find(move => move && move !== before.bestMove) || before.bestMove || null,
+      phase,
+      mover,
+      fenBefore: snapshot.fenBefore,
+      fenAfter: snapshot.fenAfter,
+      evalBefore: { cp: before.cp, mate: before.mate },
+      evalAfter: { cp: after.cp, mate: after.mate },
+    };
+    state.records.push(record);
+    if (state.records.length > MAX_BADGES) state.records.shift();
     s.lastMove = record;
     state.badgeByPly.set(snapshot.ply, record);
     trimMap(state.badgeByPly, MAX_BADGES);
@@ -331,12 +374,25 @@
     return { ...s, avgCpl: Math.round(s.avgCpl || 0), phase: { ...s.phase }, lastMove: s.lastMove ? { ...s.lastMove } : null };
   }
 
+  function getReviewData() {
+    return {
+      gameToken: state.gameToken,
+      playerSide: state.playerSide,
+      stats: getLiveStats(),
+      records: state.records.map(record => ({
+        ...record,
+        evalBefore: { ...record.evalBefore },
+        evalAfter: { ...record.evalAfter },
+      })),
+    };
+  }
+
   function removeRecap() {
     document.getElementById('cse-gi-recap')?.remove();
   }
 
   function showRecap() {
-    if (!state.enabled) return;
+    if (!state.enabled || !state.liveUiEnabled) return;
     removeRecap();
     const s = getLiveStats();
     const wrap = document.createElement('section');
@@ -353,7 +409,7 @@
   }
 
   window.CSEGameInsights = {
-    init() {}, setEnabled, handleEval, handleMove, handlePositionChange,
-    handleGameTransition, getLiveStats, reset, flushPendingBadges: scheduleBadgeSync,
+    init() {}, setEnabled, setLiveUiEnabled, handleEval, handleMove, handlePositionChange,
+    handleGameTransition, getLiveStats, getReviewData, reset, flushPendingBadges: scheduleBadgeSync,
   };
 })();
