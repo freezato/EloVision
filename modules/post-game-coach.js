@@ -89,7 +89,7 @@
       gameToken: data?.gameToken || null,
       side,
       records,
-      accuracy: accuracyFromRecords(records),
+      accuracy: records.length ? accuracyFromRecords(records) : null,
       opening: gradePhase(phaseRecords('opening')),
       middlegame: gradePhase(phaseRecords('middlegame')),
       endgame: gradePhase(phaseRecords('endgame')),
@@ -175,8 +175,8 @@
       </header>
       <div class="cse-coach-body">
         <section class="cse-coach-score">
-          <div><strong>${review.accuracy}%</strong><span>Accuracy</span></div>
-          <p>${review.records.length} player moves analysed</p>
+          <div><strong>${review.accuracy === null ? '—' : review.accuracy + '%'}</strong><span>Accuracy</span></div>
+          <p>${review.records.length ? review.records.length + ' player moves analysed' : 'No completed game is available yet'}</p>
         </section>
         <section class="cse-coach-phases">
           ${phaseRow('Opening', review.opening)}
@@ -220,8 +220,11 @@
     setEnabled,
     showReview,
     showLastReview() {
-      if (!state.enabled || !state.lastData) return;
-      showReview(state.lastData);
+      if (!state.enabled) return false;
+      const current = window.CSEGameInsights?.getReviewData?.();
+      const fallback = current && Array.isArray(current.records) && current.records.length ? current : null;
+      showReview(state.lastData || fallback || { gameToken: null, playerSide: null, records: [] });
+      return true;
     },
     close: removePanel,
   };
